@@ -16,7 +16,7 @@
     "prop-types": "^15.7",
     "react": "^18",
     "react-dom": "^18",
-    "sanity-plugin-asset-source-unsplash": "^1.0.6",
+    "sanity-plugin-asset-source-unsplash": "^3.0.1",
     "styled-components": "^5.2.0"
   },
   "devDependencies": {
