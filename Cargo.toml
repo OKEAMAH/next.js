@@ -113,7 +113,7 @@ chromiumoxide = { version = "0.5.4", features = [
 ], default-features = false }
 # For matching on errors from chromiumoxide. Keep in
 # sync with chromiumoxide's tungstenite requirement.
-tungstenite = "0.20.1"
+tungstenite = "0.21.0"
 
 # flate2_zlib requires zlib, use flate2_rust
 allsorts = { version = "0.14.0", default-features = false, features = [
