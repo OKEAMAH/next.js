@@ -267,7 +267,7 @@
     "lru-cache": "5.1.1",
     "mini-css-extract-plugin": "2.4.4",
     "msw": "2.3.0",
-    "nanoid": "3.1.32",
+    "nanoid": "3.1.31",
     "native-url": "0.3.4",
     "neo-async": "2.6.1",
     "node-html-parser": "5.3.3",
@@ -326,10 +326,10 @@
     "vm-browserify": "1.1.2",
     "watchpack": "2.4.0",
     "web-vitals": "4.2.1",
-    "webpack": "5.90.0",
+    "webpack": "5.94.0",
     "webpack-sources1": "npm:webpack-sources@1.4.3",
     "webpack-sources3": "npm:webpack-sources@3.2.3",
-    "ws": "8.2.3",
+    "ws": "8.17.1",
     "zod": "3.22.3"
   },
   "keywords": [
