@@ -347,6 +347,11 @@
     function unsupportedContext() {
       throw Error("Cannot read a Client Context from a Server Component.");
     }
+    function resolveOwner() {
+      if (currentOwner) return currentOwner;
+      var owner = componentStorage.getStore();
+      return owner ? owner : null;
+    }
     function isObjectPrototype(object) {
       if (!object) return !1;
       var ObjectPrototype = Object.prototype;
@@ -544,6 +549,55 @@
         !filename.includes("node_modules")
       );
     }
+    function filterStackTrace(request, error, skipFrames) {
+      request = request.filterStackFrame;
+      error = parseStackTrace(error, skipFrames);
+      for (skipFrames = 0; skipFrames < error.length; skipFrames++) {
+        var callsite = error[skipFrames],
+          functionName = callsite[0],
+          url = callsite[1];
+        if (url.startsWith("rsc://React/")) {
+          var envIdx = url.indexOf("/", 12),
+            suffixIdx = url.lastIndexOf("?");
+          -1 < envIdx &&
+            -1 < suffixIdx &&
+            (url = callsite[1] = url.slice(envIdx + 1, suffixIdx));
+        }
+        request(url, functionName) ||
+          (error.splice(skipFrames, 1), skipFrames--);
+      }
+      return error;
+    }
+    function patchConsole(consoleInst, methodName) {
+      var descriptor = Object.getOwnPropertyDescriptor(consoleInst, methodName);
+      if (
+        descriptor &&
+        (descriptor.configurable || descriptor.writable) &&
+        "function" === typeof descriptor.value
+      ) {
+        var originalMethod = descriptor.value;
+        descriptor = Object.getOwnPropertyDescriptor(originalMethod, "name");
+        var wrapperMethod = function () {
+          var request = resolveRequest();
+          if (("assert" !== methodName || !arguments[0]) && null !== request) {
+            var stack = filterStackTrace(
+              request,
+              Error("react-stack-top-frame"),
+              1
+            );
+            request.pendingChunks++;
+            var id = request.nextChunkId++,
+              owner = resolveOwner();
+            emitConsoleChunk(request, id, methodName, owner, stack, arguments);
+          }
+          return originalMethod.apply(this, arguments);
+        };
+        descriptor && Object.defineProperty(wrapperMethod, "name", descriptor);
+        Object.defineProperty(consoleInst, methodName, {
+          value: wrapperMethod
+        });
+      }
+    }
     function getCurrentStackInDEV() {
       return "";
     }
@@ -577,7 +631,7 @@
         pingedTasks = [],
         hints = new Set();
       this.type = type;
-      this.status = 10;
+      this.status = OPENING;
       this.flushScheduled = !1;
       this.destination = this.fatalError = null;
       this.bundlerConfig = bundlerConfig;
@@ -650,14 +704,14 @@
           task = thenable.reason;
           var digest = logRecoverableError(request, task, null);
           emitErrorChunk(request, newTask.id, digest, task);
-          newTask.status = 4;
+          newTask.status = ERRORED$1;
           request.abortableTasks.delete(newTask);
           return newTask.id;
         default:
-          if (11 === request.status)
+          if (request.status === ABORTING)
             return (
               request.abortableTasks.delete(newTask),
-              (newTask.status = 3),
+              (newTask.status = ABORTED),
               (task = stringify(serializeByValueID(request.fatalError))),
               emitModelChunk(request, newTask.id, task),
               newTask.id
@@ -682,11 +736,13 @@
           pingTask(request, newTask);
         },
         function (reason) {
-          var _digest = logRecoverableError(request, reason, newTask);
-          emitErrorChunk(request, newTask.id, _digest, reason);
-          newTask.status = 4;
-          request.abortableTasks.delete(newTask);
-          enqueueFlush(request);
+          if (newTask.status === PENDING$1) {
+            var _digest = logRecoverableError(request, reason, newTask);
+            emitErrorChunk(request, newTask.id, _digest, reason);
+            newTask.status = ERRORED$1;
+            request.abortableTasks.delete(newTask);
+            enqueueFlush(request);
+          }
         }
       );
       return newTask.id;
@@ -835,9 +891,8 @@
     function emitHint(request, code, model) {
       model = stringify(model);
       var id = request.nextChunkId++;
-      code = "H" + code;
-      code = id.toString(16) + ":" + code;
-      request.completedHintChunks.push(code + model + "\n");
+      code = serializeRowHeader("H" + code, id) + model + "\n";
+      request.completedHintChunks.push(code);
       enqueueFlush(request);
     }
     function readThenable(thenable) {
@@ -903,7 +958,8 @@
           key: key,
           owner: task.debugOwner
         };
-        outlineModel(request, componentDebugInfo);
+        componentDebugInfo.props = props;
+        outlineComponentInfo(request, componentDebugInfo);
         emitDebugChunk(request, componentDebugID, componentDebugInfo);
         task.environmentName = componentEnv;
       }
@@ -915,7 +971,7 @@
         props,
         componentDebugInfo
       );
-      if (11 === request.status)
+      if (request.status === ABORTING)
         throw (
           ("object" !== typeof props ||
             null === props ||
@@ -1048,7 +1104,7 @@
         task.debugOwner
       );
       retryTask(request, task);
-      return 1 === task.status
+      return task.status === COMPLETED
         ? serializeByValueID(task.id)
         : "$L" + task.id.toString(16);
     }
@@ -1070,7 +1126,7 @@
           return (
             (type = task.implicitSlot),
             null === task.keyPath && (task.implicitSlot = !0),
-            (props = renderModelDestructive(
+            (request = renderModelDestructive(
               request,
               task,
               emptyRoot,
@@ -1078,7 +1134,7 @@
               props.children
             )),
             (task.implicitSlot = type),
-            props
+            request
           );
         if (
           null != type &&
@@ -1088,7 +1144,7 @@
           switch (type.$$typeof) {
             case REACT_LAZY_TYPE:
               type = callLazyInitInDEV(type);
-              if (11 === request.status) throw null;
+              if (request.status === ABORTING) throw null;
               return renderElement(request, task, type, key, ref, props);
             case REACT_FORWARD_REF_TYPE:
               return renderFunctionComponent(
@@ -1104,13 +1160,12 @@
               type._store.validated = 1;
           }
       } else return renderFunctionComponent(request, task, key, type, props);
-      request = key;
-      key = task.keyPath;
-      null === request
-        ? (request = key)
-        : null !== key && (request = key + "," + request);
-      props = [REACT_ELEMENT_TYPE, type, request, props, task.debugOwner];
-      task = task.implicitSlot && null !== request ? [props] : props;
+      ref = task.keyPath;
+      null === key ? (key = ref) : null !== ref && (key = ref + "," + key);
+      null !== task.debugOwner &&
+        outlineComponentInfo(request, task.debugOwner);
+      request = [REACT_ELEMENT_TYPE, type, key, props, task.debugOwner];
+      task = task.implicitSlot && null !== key ? [request] : request;
       return task;
     }
     function pingTask(request, task) {
@@ -1118,7 +1173,7 @@
       pingedTasks.push(task);
       1 === pingedTasks.length &&
         ((request.flushScheduled = null !== request.destination),
-        21 === request.type
+        request.type === PRERENDER || request.status === OPENING
           ? scheduleMicrotask(function () {
               return performWork(request);
             })
@@ -1143,7 +1198,7 @@
         request.writtenObjects.set(model, serializeByValueID(id));
       var task = {
         id: id,
-        status: 0,
+        status: PENDING$1,
         model: model,
         keyPath: keyPath,
         implicitSlot: implicitSlot,
@@ -1197,6 +1252,9 @@
             ? "$-Infinity"
             : "$NaN";
     }
+    function serializeRowHeader(tag, id) {
+      return id.toString(16) + ":" + tag;
+    }
     function encodeReferenceChunk(request, id, reference) {
       request = stringify(reference);
       return id.toString(16) + ":" + request + "\n";
@@ -1234,14 +1292,20 @@
                 '" in the React Client Manifest. This is probably a bug in the React Server Components bundler.'
             );
         }
+        if (!0 === resolvedModuleData.async && !0 === clientReference.$$async)
+          throw Error(
+            'The module "' +
+              modulePath +
+              '" is marked as an async ESM module but was loaded as a CJS proxy. This is probably a bug in the React Server Components bundler.'
+          );
         var clientReferenceMetadata =
-          !0 === clientReference.$$async
+          !0 === resolvedModuleData.async || !0 === clientReference.$$async
             ? [resolvedModuleData.id, resolvedModuleData.chunks, existingId, 1]
             : [resolvedModuleData.id, resolvedModuleData.chunks, existingId];
         request.pendingChunks++;
         var importId = request.nextChunkId++,
           json = stringify(clientReferenceMetadata),
-          processedChunk = importId.toString(16) + ":I" + json + "\n";
+          processedChunk = serializeRowHeader("I", importId) + json + "\n";
         request.completedImportChunks.push(processedChunk);
         writtenClientReferences.set(clientReferenceKey, importId);
         return parent[0] === REACT_ELEMENT_TYPE && "1" === parentPropertyName
@@ -1369,18 +1433,6 @@
       reader.read().then(progress).catch(error);
       return "$B" + newTask.id.toString(16);
     }
-    function isReactComponentInfo(value) {
-      return (
-        (("object" === typeof value.debugTask &&
-          null !== value.debugTask &&
-          "function" === typeof value.debugTask.run) ||
-          value.debugStack instanceof Error) &&
-        "undefined" === typeof value.stack &&
-        "string" === typeof value.name &&
-        "string" === typeof value.env &&
-        void 0 !== value.owner
-      );
-    }
     function renderModel(request, task, parent, key, value) {
       var prevKeyPath = task.keyPath,
         prevImplicitSlot = task.implicitSlot;
@@ -1393,9 +1445,9 @@
           null !== parent &&
           (parent.$$typeof === REACT_ELEMENT_TYPE ||
             parent.$$typeof === REACT_LAZY_TYPE);
-        if (11 === request.status)
+        if (request.status === ABORTING)
           return (
-            (task.status = 3),
+            (task.status = ABORTED),
             (task = request.fatalError),
             parent ? "$L" + task.toString(16) : serializeByValueID(task)
           );
@@ -1489,7 +1541,7 @@
           case REACT_LAZY_TYPE:
             task.thenableState = null;
             elementReference = callLazyInitInDEV(value);
-            if (11 === request.status) throw null;
+            if (request.status === ABORTING) throw null;
             if ((_writtenObjects = value._debugInfo)) {
               if (null === debugID) return outlineTask(request, task);
               forwardDebugInfo(request, debugID, _writtenObjects);
@@ -1553,6 +1605,9 @@
                 break;
               case "3":
                 _existingReference = "props";
+                break;
+              case "4":
+                _existingReference = "_owner";
             }
           elementReference.set(
             value,
@@ -1564,6 +1619,7 @@
         if (value instanceof Set) return serializeSet(request, value);
         if ("function" === typeof FormData && value instanceof FormData)
           return serializeFormData(request, value);
+        if (value instanceof Error) return serializeErrorValue(request, value);
         if (value instanceof ArrayBuffer)
           return serializeTypedArray(request, "A", new Uint8Array(value));
         if (value instanceof Int8Array)
@@ -1608,6 +1664,7 @@
         elementReference = value[ASYNC_ITERATOR];
         if ("function" === typeof elementReference)
           return renderAsyncFragment(request, task, value, elementReference);
+        if (value instanceof Date) return "$D" + value.toJSON();
         elementReference = getPrototypeOf(value);
         if (
           elementReference !== ObjectPrototype &&
@@ -1618,13 +1675,6 @@
             "Only plain objects, and a few built-ins, can be passed to Client Components from Server Components. Classes or null prototypes are not supported." +
               describeObjectForErrorMessage(parent, parentPropertyName)
           );
-        if (isReactComponentInfo(value))
-          return {
-            name: value.name,
-            env: value.env,
-            key: value.key,
-            owner: value.owner
-          };
         if ("Object" !== objectName(value))
           callWithDebugContextInDEV(request, task, function () {
             console.error(
@@ -1769,33 +1819,35 @@
       onFatalError(error);
       null !== request.destination
         ? ((request.status = CLOSED), request.destination.destroy(error))
-        : ((request.status = 12), (request.fatalError = error));
+        : ((request.status = CLOSING), (request.fatalError = error));
+    }
+    function serializeErrorValue(request, error) {
+      var env = (0, request.environmentName)();
+      try {
+        var message = String(error.message);
+        var stack = filterStackTrace(request, error, 0);
+        var errorEnv = error.environmentName;
+        "string" === typeof errorEnv && (env = errorEnv);
+      } catch (x) {
+        (message =
+          "An error occurred but serializing the error message failed."),
+          (stack = []);
+      }
+      return (
+        "$Z" +
+        outlineModel(request, {
+          message: message,
+          stack: stack,
+          env: env
+        }).toString(16)
+      );
     }
     function emitErrorChunk(request, id, digest, error) {
       var env = (0, request.environmentName)();
       try {
         if (error instanceof Error) {
           var message = String(error.message);
-          for (
-            var filterStackFrame = request.filterStackFrame,
-              stack = parseStackTrace(error, 0),
-              i = 0;
-            i < stack.length;
-            i++
-          ) {
-            var callsite = stack[i],
-              functionName = callsite[0],
-              url = callsite[1];
-            if (url.startsWith("rsc://React/")) {
-              var envIdx = url.indexOf("/", 12),
-                suffixIdx = url.lastIndexOf("?");
-              -1 < envIdx &&
-                -1 < suffixIdx &&
-                (url = callsite[1] = url.slice(envIdx + 1, suffixIdx));
-            }
-            filterStackFrame(url, functionName) || (stack.splice(i, 1), i--);
-          }
-          var stack$jscomp$0 = stack;
+          var stack = filterStackTrace(request, error, 0);
           var errorEnv = error.environmentName;
           "string" === typeof errorEnv && (env = errorEnv);
         } else
@@ -1803,19 +1855,14 @@
             "object" === typeof error && null !== error
               ? describeObjectForErrorMessage(error)
               : String(error)),
-            (stack$jscomp$0 = []);
+            (stack = []);
       } catch (x) {
         (message =
           "An error occurred but serializing the error message failed."),
-          (stack$jscomp$0 = []);
+          (stack = []);
       }
-      digest = {
-        digest: digest,
-        message: message,
-        stack: stack$jscomp$0,
-        env: env
-      };
-      id = id.toString(16) + ":E" + stringify(digest) + "\n";
+      digest = { digest: digest, message: message, stack: stack, env: env };
+      id = serializeRowHeader("E", id) + stringify(digest) + "\n";
       request.completedErrorChunks.push(id);
     }
     function emitSymbolChunk(request, id, name) {
@@ -1827,7 +1874,7 @@
       request.completedRegularChunks.push(id);
     }
     function emitDebugChunk(request, id, debugInfo) {
-      var counter = { objectCount: 0 };
+      var counter = { objectLimit: 500 };
       debugInfo = stringify(debugInfo, function (parentPropertyName, value) {
         return renderConsoleValue(
           request,
@@ -1837,8 +1884,34 @@
           value
         );
       });
-      id = id.toString(16) + ":D" + debugInfo + "\n";
+      id = serializeRowHeader("D", id) + debugInfo + "\n";
       request.completedRegularChunks.push(id);
+    }
+    function outlineComponentInfo(request, componentInfo) {
+      if (!request.writtenObjects.has(componentInfo)) {
+        null != componentInfo.owner &&
+          outlineComponentInfo(request, componentInfo.owner);
+        var objectLimit = 10;
+        null != componentInfo.stack &&
+          (objectLimit += componentInfo.stack.length);
+        objectLimit = { objectLimit: objectLimit };
+        var componentDebugInfo = {
+          name: componentInfo.name,
+          env: componentInfo.env,
+          key: componentInfo.key,
+          owner: componentInfo.owner
+        };
+        componentDebugInfo.props = componentInfo.props;
+        objectLimit = outlineConsoleValue(
+          request,
+          objectLimit,
+          componentDebugInfo
+        );
+        request.writtenObjects.set(
+          componentInfo,
+          serializeByValueID(objectLimit)
+        );
+      }
     }
     function emitTypedArrayChunk(request, id, tag, typedArray) {
       request.pendingChunks++;
@@ -1868,8 +1941,8 @@
       parentPropertyName,
       value
     ) {
-      var originalValue = parent[parentPropertyName];
       if (null === value) return null;
+      if (value === REACT_ELEMENT_TYPE) return "$";
       if ("object" === typeof value) {
         if (isClientReference(value))
           return serializeClientReference(
@@ -1883,11 +1956,33 @@
           ((parent = request.temporaryReferences.get(value)), void 0 !== parent)
         )
           return "$T" + parent;
-        if (500 < counter.objectCount) return "$Y";
-        counter.objectCount++;
         parent = request.writtenObjects.get(value);
+        if (void 0 !== parent) return parent;
+        if (0 >= counter.objectLimit && !doNotLimit.has(value)) return "$Y";
+        counter.objectLimit--;
+        switch (value.$$typeof) {
+          case REACT_ELEMENT_TYPE:
+            return (
+              null != value._owner &&
+                outlineComponentInfo(request, value._owner),
+              "object" === typeof value.type &&
+                null !== value.type &&
+                doNotLimit.add(value.type),
+              "object" === typeof value.key &&
+                null !== value.key &&
+                doNotLimit.add(value.key),
+              doNotLimit.add(value.props),
+              null !== value._owner && doNotLimit.add(value._owner),
+              [
+                REACT_ELEMENT_TYPE,
+                value.type,
+                value.key,
+                value.props,
+                value._owner
+              ]
+            );
+        }
         if ("function" === typeof value.then) {
-          if (void 0 !== parent) return parent;
           switch (value.status) {
             case "fulfilled":
               return (
@@ -1905,74 +2000,78 @@
           }
           return "$@";
         }
-        return void 0 !== parent
-          ? parent
-          : isArrayImpl(value)
-            ? value
-            : value instanceof Map
-              ? ((value = Array.from(value)),
-                "$Q" +
-                  outlineConsoleValue(request, counter, value).toString(16))
-              : value instanceof Set
-                ? ((value = Array.from(value)),
-                  "$W" +
-                    outlineConsoleValue(request, counter, value).toString(16))
-                : "function" === typeof FormData && value instanceof FormData
-                  ? serializeFormData(request, value)
-                  : value instanceof ArrayBuffer
-                    ? serializeTypedArray(request, "A", new Uint8Array(value))
-                    : value instanceof Int8Array
-                      ? serializeTypedArray(request, "O", value)
-                      : value instanceof Uint8Array
-                        ? serializeTypedArray(request, "o", value)
-                        : value instanceof Uint8ClampedArray
-                          ? serializeTypedArray(request, "U", value)
-                          : value instanceof Int16Array
-                            ? serializeTypedArray(request, "S", value)
-                            : value instanceof Uint16Array
-                              ? serializeTypedArray(request, "s", value)
-                              : value instanceof Int32Array
-                                ? serializeTypedArray(request, "L", value)
-                                : value instanceof Uint32Array
-                                  ? serializeTypedArray(request, "l", value)
-                                  : value instanceof Float32Array
-                                    ? serializeTypedArray(request, "G", value)
-                                    : value instanceof Float64Array
-                                      ? serializeTypedArray(request, "g", value)
-                                      : value instanceof BigInt64Array
-                                        ? serializeTypedArray(
-                                            request,
-                                            "M",
-                                            value
-                                          )
-                                        : value instanceof BigUint64Array
-                                          ? serializeTypedArray(
-                                              request,
-                                              "m",
-                                              value
-                                            )
-                                          : value instanceof DataView
-                                            ? serializeTypedArray(
-                                                request,
-                                                "V",
-                                                value
-                                              )
-                                            : "function" === typeof Blob &&
-                                                value instanceof Blob
-                                              ? serializeBlob(request, value)
-                                              : getIteratorFn(value)
-                                                ? Array.from(value)
-                                                : isReactComponentInfo(value)
-                                                  ? {
-                                                      name: value.name,
-                                                      env: value.env,
-                                                      key: value.key,
-                                                      owner: value.owner
-                                                    }
-                                                  : value;
+        if (isArrayImpl(value)) return value;
+        if (value instanceof Map) {
+          value = Array.from(value);
+          counter.objectLimit++;
+          for (parent = 0; parent < value.length; parent++) {
+            var entry = value[parent];
+            doNotLimit.add(entry);
+            parentPropertyName = entry[0];
+            entry = entry[1];
+            "object" === typeof parentPropertyName &&
+              null !== parentPropertyName &&
+              doNotLimit.add(parentPropertyName);
+            "object" === typeof entry &&
+              null !== entry &&
+              doNotLimit.add(entry);
+          }
+          return (
+            "$Q" + outlineConsoleValue(request, counter, value).toString(16)
+          );
+        }
+        if (value instanceof Set) {
+          value = Array.from(value);
+          counter.objectLimit++;
+          for (parent = 0; parent < value.length; parent++)
+            (parentPropertyName = value[parent]),
+              "object" === typeof parentPropertyName &&
+                null !== parentPropertyName &&
+                doNotLimit.add(parentPropertyName);
+          return (
+            "$W" + outlineConsoleValue(request, counter, value).toString(16)
+          );
+        }
+        return "function" === typeof FormData && value instanceof FormData
+          ? serializeFormData(request, value)
+          : value instanceof Error
+            ? serializeErrorValue(request, value)
+            : value instanceof ArrayBuffer
+              ? serializeTypedArray(request, "A", new Uint8Array(value))
+              : value instanceof Int8Array
+                ? serializeTypedArray(request, "O", value)
+                : value instanceof Uint8Array
+                  ? serializeTypedArray(request, "o", value)
+                  : value instanceof Uint8ClampedArray
+                    ? serializeTypedArray(request, "U", value)
+                    : value instanceof Int16Array
+                      ? serializeTypedArray(request, "S", value)
+                      : value instanceof Uint16Array
+                        ? serializeTypedArray(request, "s", value)
+                        : value instanceof Int32Array
+                          ? serializeTypedArray(request, "L", value)
+                          : value instanceof Uint32Array
+                            ? serializeTypedArray(request, "l", value)
+                            : value instanceof Float32Array
+                              ? serializeTypedArray(request, "G", value)
+                              : value instanceof Float64Array
+                                ? serializeTypedArray(request, "g", value)
+                                : value instanceof BigInt64Array
+                                  ? serializeTypedArray(request, "M", value)
+                                  : value instanceof BigUint64Array
+                                    ? serializeTypedArray(request, "m", value)
+                                    : value instanceof DataView
+                                      ? serializeTypedArray(request, "V", value)
+                                      : "function" === typeof Blob &&
+                                          value instanceof Blob
+                                        ? serializeBlob(request, value)
+                                        : getIteratorFn(value)
+                                          ? Array.from(value)
+                                          : value;
       }
       if ("string" === typeof value)
-        return "Z" === value[value.length - 1] && originalValue instanceof Date
+        return "Z" === value[value.length - 1] &&
+          parent[parentPropertyName] instanceof Date
           ? "$D" + value
           : 1024 <= value.length
             ? serializeLargeTextString(request, value)
@@ -2001,9 +2100,12 @@
       }
       return "bigint" === typeof value
         ? "$n" + value.toString(10)
-        : "unknown type " + typeof value;
+        : value instanceof Date
+          ? "$D" + value.toJSON()
+          : "unknown type " + typeof value;
     }
     function outlineConsoleValue(request, counter, model) {
+      "object" === typeof model && null !== model && doNotLimit.add(model);
       var json = stringify(model, function (parentPropertyName, value) {
         try {
           return renderConsoleValue(
@@ -2014,7 +2116,10 @@
             value
           );
         } catch (x) {
-          return "unknown value";
+          return (
+            "Unknown Value: React could not send it from the server.\n" +
+            x.message
+          );
         }
       });
       request.pendingChunks++;
@@ -2023,11 +2128,43 @@
       request.completedRegularChunks.push(json);
       return model;
     }
+    function emitConsoleChunk(
+      request,
+      id,
+      methodName,
+      owner,
+      stackTrace,
+      args
+    ) {
+      var counter = { objectLimit: 500 };
+      null != owner && outlineComponentInfo(request, owner);
+      var env = (0, request.environmentName)();
+      methodName = [methodName, stackTrace, owner, env];
+      methodName.push.apply(methodName, args);
+      args = stringify(methodName, function (parentPropertyName, value) {
+        try {
+          return renderConsoleValue(
+            request,
+            counter,
+            this,
+            parentPropertyName,
+            value
+          );
+        } catch (x) {
+          return (
+            "Unknown Value: React could not send it from the server.\n" +
+            x.message
+          );
+        }
+      });
+      id = serializeRowHeader("W", id) + args + "\n";
+      request.completedRegularChunks.push(id);
+    }
     function forwardDebugInfo(request, id, debugInfo) {
       for (var i = 0; i < debugInfo.length; i++)
         request.pendingChunks++,
           "string" === typeof debugInfo[i].name &&
-            outlineModel(request, debugInfo[i]),
+            outlineComponentInfo(request, debugInfo[i]),
           emitDebugChunk(request, id, debugInfo[i]);
     }
     function emitChunk(request, task, value) {
@@ -2064,9 +2201,9 @@
                                     emitModelChunk(request, task.id, value));
     }
     function retryTask(request, task) {
-      if (0 === task.status) {
+      if (task.status === PENDING$1) {
         var prevDebugID = debugID;
-        task.status = 5;
+        task.status = RENDERING;
         try {
           modelRoot = task.model;
           debugID = task.id;
@@ -2088,21 +2225,23 @@
             );
             var currentEnv = (0, request.environmentName)();
             currentEnv !== task.environmentName &&
-              emitDebugChunk(request, task.id, { env: currentEnv });
+              (request.pendingChunks++,
+              emitDebugChunk(request, task.id, { env: currentEnv }));
             emitChunk(request, task, resolvedModel);
           } else {
             var json = stringify(resolvedModel),
               _currentEnv = (0, request.environmentName)();
             _currentEnv !== task.environmentName &&
-              emitDebugChunk(request, task.id, { env: _currentEnv });
+              (request.pendingChunks++,
+              emitDebugChunk(request, task.id, { env: _currentEnv }));
             emitModelChunk(request, task.id, json);
           }
           request.abortableTasks.delete(task);
-          task.status = 1;
+          task.status = COMPLETED;
         } catch (thrownValue) {
-          if (11 === request.status) {
+          if (request.status === ABORTING) {
             request.abortableTasks.delete(task);
-            task.status = 3;
+            task.status = ABORTED;
             var model = stringify(serializeByValueID(request.fatalError));
             emitModelChunk(request, task.id, model);
           } else {
@@ -2115,13 +2254,13 @@
               null !== x &&
               "function" === typeof x.then
             ) {
-              task.status = 0;
+              task.status = PENDING$1;
               task.thenableState = getThenableStateAfterSuspending();
               var ping = task.ping;
               x.then(ping, ping);
             } else {
               request.abortableTasks.delete(task);
-              task.status = 4;
+              task.status = ERRORED$1;
               var digest = logRecoverableError(request, x, task);
               emitErrorChunk(request, task.id, digest, x);
             }
@@ -2231,13 +2370,12 @@
     }
     function startWork(request) {
       request.flushScheduled = null !== request.destination;
-      21 === request.type
-        ? scheduleMicrotask(function () {
-            requestStorage.run(request, performWork, request);
-          })
-        : setImmediate(function () {
-            return requestStorage.run(request, performWork, request);
-          });
+      scheduleMicrotask(function () {
+        requestStorage.run(request, performWork, request);
+      });
+      setImmediate(function () {
+        request.status === OPENING && (request.status = 11);
+      });
     }
     function enqueueFlush(request) {
       !1 === request.flushScheduled &&
@@ -2251,7 +2389,7 @@
         }));
     }
     function startFlowing(request, destination) {
-      if (12 === request.status)
+      if (request.status === CLOSING)
         (request.status = CLOSED), destination.destroy(request.fatalError);
       else if (request.status !== CLOSED && null === request.destination) {
         request.destination = destination;
@@ -2264,7 +2402,7 @@
     }
     function abort(request, reason) {
       try {
-        10 === request.status && (request.status = 11);
+        11 >= request.status && (request.status = ABORTING);
         var abortableTasks = request.abortableTasks;
         if (0 < abortableTasks.size) {
           var error =
@@ -2285,8 +2423,8 @@
           request.pendingChunks++;
           emitErrorChunk(request, _errorId2, digest, error);
           abortableTasks.forEach(function (task) {
-            if (5 !== task.status) {
-              task.status = 3;
+            if (task.status !== RENDERING) {
+              task.status = ABORTED;
               var ref = serializeByValueID(_errorId2);
               task = encodeReferenceChunk(request, task.id, ref);
               request.completedErrorChunks.push(task);
@@ -3378,15 +3516,11 @@
           void 0 === entry &&
             ((entry = resourceType()), cache.set(resourceType, entry));
           return entry;
-        },
-        getOwner: function () {
-          if (currentOwner) return currentOwner;
-          var owner = componentStorage.getStore();
-          return owner ? owner : null;
         }
-      },
-      ReactSharedInternalsServer =
-        React.__SERVER_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;
+      };
+    DefaultAsyncDispatcher.getOwner = resolveOwner;
+    var ReactSharedInternalsServer =
+      React.__SERVER_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;
     if (!ReactSharedInternalsServer)
       throw Error(
         'The "react" package in this environment is not configured correctly. The "react-server" condition must be enabled in any environment that runs React Server Components.'
@@ -3428,9 +3562,34 @@
       jsxPropsParents = new WeakMap(),
       jsxChildrenParents = new WeakMap(),
       CLIENT_REFERENCE_TAG = Symbol.for("react.client.reference"),
-      ObjectPrototype = Object.prototype,
+      doNotLimit = new WeakSet();
+    "object" === typeof console &&
+      null !== console &&
+      (patchConsole(console, "assert"),
+      patchConsole(console, "debug"),
+      patchConsole(console, "dir"),
+      patchConsole(console, "dirxml"),
+      patchConsole(console, "error"),
+      patchConsole(console, "group"),
+      patchConsole(console, "groupCollapsed"),
+      patchConsole(console, "groupEnd"),
+      patchConsole(console, "info"),
+      patchConsole(console, "log"),
+      patchConsole(console, "table"),
+      patchConsole(console, "trace"),
+      patchConsole(console, "warn"));
+    var ObjectPrototype = Object.prototype,
       stringify = JSON.stringify,
-      CLOSED = 13,
+      PENDING$1 = 0,
+      COMPLETED = 1,
+      ABORTED = 3,
+      ERRORED$1 = 4,
+      RENDERING = 5,
+      OPENING = 10,
+      ABORTING = 12,
+      CLOSING = 13,
+      CLOSED = 14,
+      PRERENDER = 21,
       currentRequest = null,
       debugID = null,
       modelRoot = !1,
@@ -3552,12 +3711,12 @@
             "React doesn't accept base64 encoded file uploads because we don't expect form data passed from a browser to ever encode data that way. If that's the wrong assumption, we can easily fix it."
           );
         pendingFiles++;
-        var JSCompiler_object_inline_chunks_135 = [];
+        var JSCompiler_object_inline_chunks_141 = [];
         value.on("data", function (chunk) {
-          JSCompiler_object_inline_chunks_135.push(chunk);
+          JSCompiler_object_inline_chunks_141.push(chunk);
         });
         value.on("end", function () {
-          var blob = new Blob(JSCompiler_object_inline_chunks_135, {
+          var blob = new Blob(JSCompiler_object_inline_chunks_141, {
             type: mimeType
           });
           response._formData.append(name, blob, filename);

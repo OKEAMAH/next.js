@@ -77,6 +77,7 @@ export interface CachedAppPageValue {
   status: number | undefined
   postponed: string | undefined
   headers: OutgoingHttpHeaders | undefined
+  segmentData: { [segmentPath: string]: string } | undefined
 }
 
 export interface CachedPageValue {
@@ -101,6 +102,7 @@ export interface CachedRouteValue {
 export interface CachedImageValue {
   kind: CachedRouteKind.IMAGE
   etag: string
+  upstreamEtag: string
   buffer: Buffer
   extension: string
   isMiss?: boolean
@@ -116,6 +118,7 @@ export interface IncrementalCachedAppPageValue {
   headers: OutgoingHttpHeaders | undefined
   postponed: string | undefined
   status: number | undefined
+  segmentData: { [segmentPath: string]: string } | undefined
 }
 
 export interface IncrementalCachedPageValue {
@@ -135,6 +138,7 @@ export type IncrementalCacheEntry = {
   // -1 here dictates a blocking revalidate should be used
   isStale?: boolean | -1
   value: IncrementalCacheValue | null
+  isFallback: boolean | undefined
 }
 
 export type IncrementalCacheValue =
@@ -157,6 +161,7 @@ export type ResponseCacheEntry = {
   value: ResponseCacheValue | null
   isStale?: boolean | -1
   isMiss?: boolean
+  isFallback: boolean | undefined
 }
 
 /**
@@ -176,6 +181,7 @@ export type IncrementalCacheItem = {
   value: IncrementalCacheValue | null
   isStale?: boolean | -1
   isMiss?: boolean
+  isFallback: boolean | undefined
 } | null
 
 export const enum IncrementalCacheKind {

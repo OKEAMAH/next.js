@@ -10,7 +10,7 @@ import type { SubresourceIntegrityAlgorithm } from '../build/webpack/plugins/sub
 import type { WEB_VITALS } from '../shared/lib/utils'
 import type { NextParsedUrlQuery } from './request-meta'
 import type { SizeLimit } from '../types'
-import type { SwrDelta } from './lib/revalidate'
+import type { ExpireTime } from './lib/revalidate'
 import type { SupportedTestRunners } from '../cli/next-test'
 import type { ExperimentalPPRConfig } from './lib/experimental/ppr'
 
@@ -155,6 +155,13 @@ export interface ExperimentalTurboOptions {
   memoryLimit?: number
 
   /**
+   * Enable persistent caching for the turbopack dev server and build.
+   * Need to provide the expected level of stability, otherwise it will fail.
+   * Currently stability level: 1
+   */
+  unstablePersistentCaching?: number | false
+
+  /**
    * Enable tree shaking for the turbopack dev server and build.
    */
   treeShaking?: boolean
@@ -165,6 +172,12 @@ export interface ExperimentalTurboOptions {
    * for production.
    */
   moduleIdStrategy?: 'named' | 'deterministic'
+
+  /**
+   * This is the repo root usually and only files above this
+   * directory can be resolved by turbopack.
+   */
+  root?: string
 }
 
 export interface WebpackConfigContext {
@@ -255,9 +268,9 @@ export interface ExperimentalConfig {
   fetchCacheKeyPrefix?: string
   optimisticClientCache?: boolean
   /**
-   * @deprecated use config.swrDelta instead
+   * @deprecated use config.expireTime instead
    */
-  swrDelta?: SwrDelta
+  expireTime?: ExpireTime
   middlewarePrefetch?: 'strict' | 'flexible'
   manualClientBasePath?: boolean
   /**
@@ -764,8 +777,11 @@ export interface NextConfig extends Record<string, any> {
    */
   basePath?: string
 
-  /** @see [Customizing sass options](https://nextjs.org/docs/basic-features/built-in-css-support#customizing-sass-options) */
-  sassOptions?: { [key: string]: any }
+  /** @see [Customizing sass options](https://nextjs.org/docs/app/api-reference/next-config-js/sassOptions) */
+  sassOptions?: {
+    implementation?: string
+    [key: string]: any
+  }
 
   /**
    * Enable browser source map generation during the production build
@@ -899,7 +915,7 @@ export interface NextConfig extends Record<string, any> {
   /**
    * period (in seconds) where the server allow to serve stale cache
    */
-  swrDelta?: SwrDelta
+  expireTime?: ExpireTime
 
   /**
    * Enable experimental features. Note that all experimental features are subject to breaking changes in the future.
@@ -935,6 +951,10 @@ export interface NextConfig extends Record<string, any> {
    * were not detected on a per-page basis.
    */
   outputFileTracingIncludes?: Record<string, string[]>
+
+  watchOptions?: {
+    pollIntervalMs?: number
+  }
 }
 
 export const defaultConfig: NextConfig = {
@@ -950,7 +970,7 @@ export const defaultConfig: NextConfig = {
   distDir: '.next',
   cleanDistDir: true,
   assetPrefix: '',
-  cacheHandler: undefined,
+  cacheHandler: process.env.NEXT_CACHE_HANDLER_PATH,
   // default to 50MB limit
   cacheMaxMemorySize: 50 * 1024 * 1024,
   configOrigin: 'default',
@@ -988,7 +1008,7 @@ export const defaultConfig: NextConfig = {
     keepAlive: true,
   },
   logging: {},
-  swrDelta: undefined,
+  expireTime: process.env.__NEXT_TEST_MODE ? undefined : 31536000,
   staticPageGenerationTimeout: 60,
   output: !!process.env.NEXT_PRIVATE_STANDALONE ? 'standalone' : undefined,
   modularizeImports: undefined,

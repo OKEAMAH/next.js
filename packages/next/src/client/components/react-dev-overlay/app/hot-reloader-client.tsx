@@ -7,6 +7,7 @@ import {
   ACTION_BEFORE_REFRESH,
   ACTION_BUILD_ERROR,
   ACTION_BUILD_OK,
+  ACTION_DEBUG_INFO,
   ACTION_REFRESH,
   ACTION_STATIC_INDICATOR,
   ACTION_UNHANDLED_ERROR,
@@ -14,7 +15,7 @@ import {
   ACTION_VERSION_INFO,
   useErrorOverlayReducer,
 } from '../shared'
-import { parseStack } from '../internal/helpers/parseStack'
+import { parseStack } from '../internal/helpers/parse-stack'
 import ReactDevOverlay from './ReactDevOverlay'
 import { useErrorHandler } from '../internal/helpers/use-error-handler'
 import { RuntimeErrorHandler } from '../internal/helpers/runtime-error-handler'
@@ -34,11 +35,13 @@ import type {
 import { extractModulesFromTurbopackMessage } from '../../../../server/dev/extract-modules-from-turbopack-message'
 import { REACT_REFRESH_FULL_RELOAD_FROM_ERROR } from '../shared'
 import type { HydrationErrorState } from '../internal/helpers/hydration-error-info'
+import type { DebugInfo } from '../types'
 
 export interface Dispatcher {
   onBuildOk(): void
   onBuildError(message: string): void
   onVersionInfo(versionInfo: VersionInfo): void
+  onDebugInfo(debugInfo: DebugInfo): void
   onBeforeRefresh(): void
   onRefresh(): void
   onStaticIndicator(status: boolean): void
@@ -330,7 +333,20 @@ function processMessage(
           // as we'll receive the updated manifest before usePathname
           // triggers for new value
           if ((pathnameRef.current as string) in obj.data) {
-            dispatcher.onStaticIndicator(true)
+            // the indicator can be hidden for an hour.
+            // check if it's still hidden
+            const indicatorHiddenAt = Number(
+              localStorage?.getItem('__NEXT_DISMISS_PRERENDER_INDICATOR')
+            )
+
+            const isHidden =
+              indicatorHiddenAt &&
+              !isNaN(indicatorHiddenAt) &&
+              Date.now() < indicatorHiddenAt
+
+            if (!isHidden) {
+              dispatcher.onStaticIndicator(true)
+            }
           } else {
             dispatcher.onStaticIndicator(false)
           }
@@ -356,6 +372,7 @@ function processMessage(
 
       // Is undefined when it's a 'built' event
       if ('versionInfo' in obj) dispatcher.onVersionInfo(obj.versionInfo)
+      if ('debug' in obj && obj.debug) dispatcher.onDebugInfo(obj.debug)
 
       const hasErrors = Boolean(errors && errors.length)
       // Compilation with errors (e.g. syntax error or missing modules).
@@ -530,6 +547,9 @@ export default function HotReload({
       onStaticIndicator(status: boolean) {
         dispatch({ type: ACTION_STATIC_INDICATOR, staticIndicator: status })
       },
+      onDebugInfo(debugInfo) {
+        dispatch({ type: ACTION_DEBUG_INFO, debugInfo })
+      },
     }
   }, [dispatch])
 
@@ -538,7 +558,7 @@ export default function HotReload({
       const errorDetails = (error as any).details as
         | HydrationErrorState
         | undefined
-      // Component stack is added to the error in use-error-handler in case there was a hydration errror
+      // Component stack is added to the error in use-error-handler in case there was a hydration error
       const componentStackTrace =
         (error as any)._componentStack || errorDetails?.componentStack
       const warning = errorDetails?.warning
@@ -593,7 +613,18 @@ export default function HotReload({
 
       if (appIsrManifest) {
         if (pathname in appIsrManifest) {
-          dispatcher.onStaticIndicator(true)
+          const indicatorHiddenAt = Number(
+            localStorage?.getItem('__NEXT_DISMISS_PRERENDER_INDICATOR')
+          )
+
+          const isHidden =
+            indicatorHiddenAt &&
+            !isNaN(indicatorHiddenAt) &&
+            Date.now() < indicatorHiddenAt
+
+          if (!isHidden) {
+            dispatcher.onStaticIndicator(true)
+          }
         } else {
           dispatcher.onStaticIndicator(false)
         }
@@ -619,7 +650,10 @@ export default function HotReload({
         )
       } catch (err: any) {
         console.warn(
-          '[HMR] Invalid message: ' + event.data + '\n' + (err?.stack ?? '')
+          '[HMR] Invalid message: ' +
+            JSON.stringify(event.data) +
+            '\n' +
+            (err?.stack ?? '')
         )
       }
     }

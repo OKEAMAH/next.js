@@ -32,6 +32,7 @@ export async function fromResponseCacheEntry(
               rscData: cacheEntry.value.rscData,
               headers: cacheEntry.value.headers,
               status: cacheEntry.value.status,
+              segmentData: cacheEntry.value.segmentData,
             }
           : cacheEntry.value,
   }
@@ -52,6 +53,7 @@ export async function toResponseCacheEntry(
     isMiss: response.isMiss,
     isStale: response.isStale,
     revalidate: response.revalidate,
+    isFallback: response.isFallback,
     value:
       response.value?.kind === CachedRouteKind.PAGES
         ? ({
@@ -69,6 +71,7 @@ export async function toResponseCacheEntry(
               headers: response.value.headers,
               status: response.value.status,
               postponed: response.value.postponed,
+              segmentData: response.value.segmentData,
             } satisfies CachedAppPageValue)
           : response.value,
   }

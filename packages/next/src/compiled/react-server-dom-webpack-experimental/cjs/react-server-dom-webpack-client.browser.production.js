@@ -458,12 +458,17 @@ function processReply(
     pendingParts = 0,
     formData = null,
     writtenObjects = new WeakMap(),
-    modelRoot = root;
-  root = serializeModel(root, 0);
+    modelRoot = root,
+    json = serializeModel(root, 0);
   null === formData
-    ? resolve(root)
-    : (formData.set(formFieldPrefix + "0", root),
+    ? resolve(json)
+    : (formData.set(formFieldPrefix + "0", json),
       0 === pendingParts && resolve(formData));
+  return function () {
+    0 < pendingParts &&
+      ((pendingParts = 0),
+      null === formData ? resolve(json) : resolve(formData));
+  };
 }
 function registerServerReference(proxy, reference) {
   knownServerReferences.set(proxy, reference);
@@ -698,15 +703,19 @@ function waitForReference(
         }
       value = value[path[i]];
     }
-    parentObject[key] = map(response, value);
-    "" === key && null === handler.value && (handler.value = parentObject[key]);
-    parentObject[0] === REACT_ELEMENT_TYPE &&
-      "3" === key &&
+    i = map(response, value);
+    parentObject[key] = i;
+    "" === key && null === handler.value && (handler.value = i);
+    if (
+      parentObject[0] === REACT_ELEMENT_TYPE &&
       "object" === typeof handler.value &&
       null !== handler.value &&
-      handler.value.$$typeof === REACT_ELEMENT_TYPE &&
-      null === handler.value.props &&
-      (handler.value.props = parentObject[key]);
+      handler.value.$$typeof === REACT_ELEMENT_TYPE
+    )
+      switch (((value = handler.value), key)) {
+        case "3":
+          value.props = i;
+      }
     handler.deps--;
     0 === handler.deps &&
       ((i = handler.chunk),
@@ -758,10 +767,8 @@ function getOutlinedModel(response, reference, parentObject, key, map) {
   switch (id.status) {
     case "fulfilled":
       var value = id.value;
-      for (id = 1; id < reference.length; id++)
-        if (
-          ((value = value[reference[id]]), value.$$typeof === REACT_LAZY_TYPE)
-        )
+      for (id = 1; id < reference.length; id++) {
+        for (; value.$$typeof === REACT_LAZY_TYPE; )
           if (((value = value._payload), "fulfilled" === value.status))
             value = value.value;
           else
@@ -771,8 +778,10 @@ function getOutlinedModel(response, reference, parentObject, key, map) {
               key,
               response,
               map,
-              reference.slice(id)
+              reference.slice(id - 1)
             );
+        value = value[reference[id]];
+      }
       return map(response, value);
     case "pending":
     case "blocked":
@@ -883,6 +892,8 @@ function parseModelString(response, parentObject, key, value) {
           (value = value.slice(2)),
           getOutlinedModel(response, value, parentObject, key, createFormData)
         );
+      case "Z":
+        return resolveErrorProd();
       case "i":
         return (
           (value = value.slice(2)),
@@ -1156,6 +1167,13 @@ function startAsyncIterable(response, id, iterator) {
     }
   );
 }
+function resolveErrorProd() {
+  var error = Error(
+    "An error occurred in the Server Components render. The specific message is omitted in production builds to avoid leaking sensitive details. A digest property is included on this error instance which may provide additional details about the nature of the error."
+  );
+  error.stack = "Error: " + error.message;
+  return error;
+}
 function mergeBuffer(buffer, lastChunk) {
   for (var l = buffer.length, byteLength = lastChunk.length, i = 0; i < l; i++)
     byteLength += buffer[i].byteLength;
@@ -1291,12 +1309,9 @@ function processFullBinaryRow(response, id, tag, buffer, chunk) {
       }
       break;
     case 69:
-      tag = JSON.parse(buffer).digest;
-      buffer = Error(
-        "An error occurred in the Server Components render. The specific message is omitted in production builds to avoid leaking sensitive details. A digest property is included on this error instance which may provide additional details about the nature of the error."
-      );
-      buffer.stack = "Error: " + buffer.message;
-      buffer.digest = tag;
+      tag = JSON.parse(buffer);
+      buffer = resolveErrorProd();
+      buffer.digest = tag.digest;
       tag = response._chunks;
       (chunk = tag.get(id))
         ? triggerErrorOnChunk(chunk, buffer)
@@ -1524,7 +1539,7 @@ exports.createTemporaryReferenceSet = function () {
 };
 exports.encodeReply = function (value, options) {
   return new Promise(function (resolve, reject) {
-    processReply(
+    var abort = processReply(
       value,
       "",
       options && options.temporaryReferences
@@ -1533,5 +1548,16 @@ exports.encodeReply = function (value, options) {
       resolve,
       reject
     );
+    if (options && options.signal) {
+      var signal = options.signal;
+      if (signal.aborted) abort(signal.reason);
+      else {
+        var listener = function () {
+          abort(signal.reason);
+          signal.removeEventListener("abort", listener);
+        };
+        signal.addEventListener("abort", listener);
+      }
+    }
   });
 };

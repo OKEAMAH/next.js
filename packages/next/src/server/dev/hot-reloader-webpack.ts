@@ -7,7 +7,10 @@ import type { UrlObject } from 'url'
 import type { RouteDefinition } from '../route-definitions/route-definition'
 
 import { webpack, StringXor } from 'next/dist/compiled/webpack/webpack'
-import { getOverlayMiddleware } from '../../client/components/react-dev-overlay/server/middleware'
+import {
+  getOverlayMiddleware,
+  getSourceMapMiddleware,
+} from '../../client/components/react-dev-overlay/server/middleware'
 import { WebpackHotMiddleware } from './hot-middleware'
 import { join, relative, isAbsolute, posix } from 'path'
 import {
@@ -79,6 +82,7 @@ import type { HMR_ACTION_TYPES } from './hot-reloader-types'
 import type { WebpackError } from 'webpack'
 import { PAGE_TYPES } from '../../lib/page-types'
 import { FAST_REFRESH_RUNTIME_RELOAD } from './messages'
+import { getNodeDebugType } from '../lib/utils'
 
 const MILLISECONDS_IN_NANOSECOND = BigInt(1_000_000)
 const isTestMode = !!(
@@ -228,7 +232,11 @@ export default class HotReloaderWebpack implements NextJsHotReloaderInterface {
   private dir: string
   private buildId: string
   private encryptionKey: string
-  private interceptors: any[]
+  private middlewares: ((
+    req: IncomingMessage,
+    res: ServerResponse,
+    next: () => void
+  ) => Promise<void>)[]
   private pagesDir?: string
   private distDir: string
   private webpackHotMiddleware?: WebpackHotMiddleware
@@ -254,6 +262,7 @@ export default class HotReloaderWebpack implements NextJsHotReloaderInterface {
     staleness: 'unknown',
     installed: '0.0.0',
   }
+  private devtoolsFrontendUrl: string | undefined
   private reloadAfterInvalidation: boolean = false
 
   public serverStats: webpack.Stats | null
@@ -295,7 +304,7 @@ export default class HotReloaderWebpack implements NextJsHotReloaderInterface {
     this.buildId = buildId
     this.encryptionKey = encryptionKey
     this.dir = dir
-    this.interceptors = []
+    this.middlewares = []
     this.pagesDir = pagesDir
     this.appDir = appDir
     this.distDir = distDir
@@ -377,13 +386,16 @@ export default class HotReloaderWebpack implements NextJsHotReloaderInterface {
 
     const { finished } = await handlePageBundleRequest(res, parsedUrl)
 
-    for (const fn of this.interceptors) {
-      await new Promise<void>((resolve, reject) => {
-        fn(req, res, (err: Error) => {
-          if (err) return reject(err)
-          resolve()
-        })
+    for (const middleware of this.middlewares) {
+      let calledNext = false
+
+      await middleware(req, res, () => {
+        calledNext = true
       })
+
+      if (!calledNext) {
+        return { finished: true }
+      }
     }
 
     return { finished }
@@ -751,6 +763,23 @@ export default class HotReloaderWebpack implements NextJsHotReloaderInterface {
       isTestMode || this.telemetry.isEnabled
     )
 
+    const nodeDebugType = getNodeDebugType()
+    if (nodeDebugType && !this.devtoolsFrontendUrl) {
+      const debugPort = process.debugPort
+      let debugInfo
+      try {
+        // It requires to use 127.0.0.1 instead of localhost for server-side fetching.
+        const debugInfoList = await fetch(
+          `http://127.0.0.1:${debugPort}/json/list`
+        ).then((res) => res.json())
+        // There will be only one item for current process, so always get the first item.
+        debugInfo = debugInfoList[0]
+      } catch {}
+      if (debugInfo) {
+        this.devtoolsFrontendUrl = debugInfo.devtoolsFrontendUrl
+      }
+    }
+
     await this.clean(startSpan)
     // Ensure distDir exists before writing package.json
     await fs.mkdir(this.distDir, { recursive: true })
@@ -833,13 +862,19 @@ export default class HotReloaderWebpack implements NextJsHotReloaderInterface {
                   isDev: true,
                   page,
                 })
-              : {}
+              : undefined
 
-            if (staticInfo.amp === true || staticInfo.amp === 'hybrid') {
-              this.hasAmpEntrypoints = true
+            if (staticInfo?.type === PAGE_TYPES.PAGES) {
+              if (
+                staticInfo.config?.config?.amp === true ||
+                staticInfo.config?.config?.amp === 'hybrid'
+              ) {
+                this.hasAmpEntrypoints = true
+              }
             }
+
             const isServerComponent =
-              isAppPath && staticInfo.rsc !== RSC_MODULE_TYPES.client
+              isAppPath && staticInfo?.rsc !== RSC_MODULE_TYPES.client
 
             const pageType: PAGE_TYPES = entryData.bundlePath.startsWith(
               'pages/'
@@ -861,7 +896,7 @@ export default class HotReloaderWebpack implements NextJsHotReloaderInterface {
 
             runDependingOnPageType({
               page,
-              pageRuntime: staticInfo.runtime,
+              pageRuntime: staticInfo?.runtime,
               pageType,
               onEdgeServer: () => {
                 // TODO-APP: verify if child entry should support.
@@ -903,9 +938,9 @@ export default class HotReloaderWebpack implements NextJsHotReloaderInterface {
                       basePath: this.config.basePath,
                       assetPrefix: this.config.assetPrefix,
                       nextConfigOutput: this.config.output,
-                      preferredRegion: staticInfo.preferredRegion,
+                      preferredRegion: staticInfo?.preferredRegion,
                       middlewareConfig: Buffer.from(
-                        JSON.stringify(staticInfo.middleware || {})
+                        JSON.stringify(staticInfo?.middleware || {})
                       ).toString('base64'),
                     }).import
                   : undefined
@@ -925,7 +960,7 @@ export default class HotReloaderWebpack implements NextJsHotReloaderInterface {
                     isServerComponent,
                     appDirLoader,
                     pagesType: isAppPath ? PAGE_TYPES.APP : PAGE_TYPES.PAGES,
-                    preferredRegion: staticInfo.preferredRegion,
+                    preferredRegion: staticInfo?.preferredRegion,
                   }),
                   hasAppDir,
                 })
@@ -1002,9 +1037,9 @@ export default class HotReloaderWebpack implements NextJsHotReloaderInterface {
                     basePath: this.config.basePath,
                     assetPrefix: this.config.assetPrefix,
                     nextConfigOutput: this.config.output,
-                    preferredRegion: staticInfo.preferredRegion,
+                    preferredRegion: staticInfo?.preferredRegion,
                     middlewareConfig: Buffer.from(
-                      JSON.stringify(staticInfo.middleware || {})
+                      JSON.stringify(staticInfo?.middleware || {})
                     ).toString('base64'),
                   })
                 } else if (isAPIRoute(page)) {
@@ -1012,8 +1047,8 @@ export default class HotReloaderWebpack implements NextJsHotReloaderInterface {
                     kind: RouteKind.PAGES_API,
                     page,
                     absolutePagePath: relativeRequest,
-                    preferredRegion: staticInfo.preferredRegion,
-                    middlewareConfig: staticInfo.middleware || {},
+                    preferredRegion: staticInfo?.preferredRegion,
+                    middlewareConfig: staticInfo?.middleware || {},
                   })
                 } else if (
                   !isMiddlewareFile(page) &&
@@ -1026,8 +1061,8 @@ export default class HotReloaderWebpack implements NextJsHotReloaderInterface {
                     page,
                     pages: this.pagesMapping,
                     absolutePagePath: relativeRequest,
-                    preferredRegion: staticInfo.preferredRegion,
-                    middlewareConfig: staticInfo.middleware ?? {},
+                    preferredRegion: staticInfo?.preferredRegion,
+                    middlewareConfig: staticInfo?.middleware ?? {},
                   })
                 } else {
                   value = relativeRequest
@@ -1433,7 +1468,8 @@ export default class HotReloaderWebpack implements NextJsHotReloaderInterface {
 
     this.webpackHotMiddleware = new WebpackHotMiddleware(
       this.multiCompiler.compilers,
-      this.versionInfo
+      this.versionInfo,
+      this.devtoolsFrontendUrl
     )
 
     let booted = false
@@ -1465,10 +1501,17 @@ export default class HotReloaderWebpack implements NextJsHotReloaderInterface {
       }),
     })
 
-    this.interceptors = [
+    this.middlewares = [
       getOverlayMiddleware({
+        distDirectory: this.distDir,
         rootDirectory: this.dir,
-        stats: () => this.clientStats,
+        clientStats: () => this.clientStats,
+        serverStats: () => this.serverStats,
+        edgeServerStats: () => this.edgeServerStats,
+      }),
+      getSourceMapMiddleware({
+        distDirectory: this.distDir,
+        clientStats: () => this.clientStats,
         serverStats: () => this.serverStats,
         edgeServerStats: () => this.edgeServerStats,
       }),

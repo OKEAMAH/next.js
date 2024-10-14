@@ -1,8 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{Context, Result};
-use indexmap::{indexmap, IndexMap};
-use turbo_tasks::{RcStr, Value, Vc};
+use turbo_tasks::{fxindexmap, FxIndexMap, RcStr, Value, Vc};
 use turbo_tasks_fs::{FileSystem, FileSystemPath};
 use turbopack_core::{
     reference_type::{CommonJsReferenceSubType, ReferenceType},
@@ -25,6 +24,7 @@ use crate::{
     next_edge::unsupported::NextEdgeUnsupportedModuleReplacer,
     next_font::google::{
         NextFontGoogleCssModuleReplacer, NextFontGoogleFontFileReplacer, NextFontGoogleReplacer,
+        GOOGLE_FONTS_INTERNAL_PREFIX,
     },
     next_server::context::ServerContextType,
     util::NextRuntime,
@@ -116,14 +116,12 @@ pub async fn get_next_client_import_map(
     match ty.into_value() {
         ClientContextType::Pages { .. } => {}
         ClientContextType::App { app_dir } => {
-            let react_flavor = if *next_config.enable_ppr().await?
-                || *next_config.enable_taint().await?
-                || *next_config.enable_dynamic_io().await?
-            {
-                "-experimental"
-            } else {
-                ""
-            };
+            let react_flavor =
+                if *next_config.enable_ppr().await? || *next_config.enable_taint().await? {
+                    "-experimental"
+                } else {
+                    ""
+                };
 
             import_map.insert_exact_alias(
                 "react",
@@ -210,7 +208,7 @@ pub async fn get_next_client_import_map(
     insert_exact_alias_map(
         &mut import_map,
         project_path,
-        indexmap! {
+        fxindexmap! {
             "server-only" => "next/dist/compiled/server-only/index".to_string(),
             "client-only" => "next/dist/compiled/client-only/index".to_string(),
             "next/dist/compiled/server-only" => "next/dist/compiled/server-only/index".to_string(),
@@ -383,7 +381,7 @@ pub async fn get_next_edge_import_map(
     insert_wildcard_alias_map(
         &mut import_map,
         project_path,
-        indexmap! {
+        fxindexmap! {
             "next/dist/build/" => "next/dist/esm/build/*".to_string(),
             "next/dist/client/" => "next/dist/esm/client/*".to_string(),
             "next/dist/shared/" => "next/dist/esm/shared/*".to_string(),
@@ -398,7 +396,7 @@ pub async fn get_next_edge_import_map(
     insert_exact_alias_map(
         &mut import_map,
         project_path,
-        indexmap! {
+        fxindexmap! {
             "next/app" => "next/dist/api/app".to_string(),
             "next/document" => "next/dist/api/document".to_string(),
             "next/dynamic" => "next/dist/api/dynamic".to_string(),
@@ -552,17 +550,35 @@ async fn insert_next_server_special_aliases(
     runtime: NextRuntime,
     next_config: Vc<NextConfig>,
 ) -> Result<()> {
-    let external_if_node = move |context_dir: Vc<FileSystemPath>, request: &str| match runtime {
+    let external_cjs_if_node = move |context_dir: Vc<FileSystemPath>, request: &str| match runtime {
         NextRuntime::Edge => request_to_import_mapping(context_dir, request),
-        NextRuntime::NodeJs => external_request_to_import_mapping(request),
+        NextRuntime::NodeJs => external_request_to_cjs_import_mapping(request),
     };
+    let external_esm_if_node = move |context_dir: Vc<FileSystemPath>, request: &str| match runtime {
+        NextRuntime::Edge => request_to_import_mapping(context_dir, request),
+        NextRuntime::NodeJs => external_request_to_esm_import_mapping(request),
+    };
+
+    import_map.insert_exact_alias(
+        "next/dist/compiled/@vercel/og/index.node.js",
+        external_esm_if_node(project_path, "next/dist/compiled/@vercel/og/index.node.js"),
+    );
+
+    import_map.insert_exact_alias(
+        "next/dist/server/ReactDOMServerPages",
+        ImportMapping::Alternatives(vec![
+            request_to_import_mapping(project_path, "react-dom/server.edge"),
+            request_to_import_mapping(project_path, "react-dom/server.browser"),
+        ])
+        .cell(),
+    );
 
     import_map.insert_exact_alias(
         "@opentelemetry/api",
         // It needs to prefer the local version of @opentelemetry/api
         ImportMapping::Alternatives(vec![
-            external_if_node(project_path, "@opentelemetry/api"),
-            external_if_node(project_path, "next/dist/compiled/@opentelemetry/api"),
+            external_cjs_if_node(project_path, "@opentelemetry/api"),
+            external_cjs_if_node(project_path, "next/dist/compiled/@opentelemetry/api"),
         ])
         .cell(),
     );
@@ -600,7 +616,7 @@ async fn insert_next_server_special_aliases(
             insert_exact_alias_map(
                 import_map,
                 project_path,
-                indexmap! {
+                fxindexmap! {
                     "server-only" => "next/dist/compiled/server-only/empty".to_string(),
                     "client-only" => "next/dist/compiled/client-only/index".to_string(),
                     "next/dist/compiled/server-only" => "next/dist/compiled/server-only/empty".to_string(),
@@ -617,7 +633,7 @@ async fn insert_next_server_special_aliases(
             insert_exact_alias_map(
                 import_map,
                 project_path,
-                indexmap! {
+                fxindexmap! {
                     "server-only" => "next/dist/compiled/server-only/empty".to_string(),
                     "client-only" => "next/dist/compiled/client-only/error".to_string(),
                     "next/dist/compiled/server-only" => "next/dist/compiled/server-only/empty".to_string(),
@@ -629,7 +645,7 @@ async fn insert_next_server_special_aliases(
             insert_exact_alias_map(
                 import_map,
                 project_path,
-                indexmap! {
+                fxindexmap! {
                     "server-only" => "next/dist/compiled/server-only/index".to_string(),
                     "client-only" => "next/dist/compiled/client-only/index".to_string(),
                     "next/dist/compiled/server-only" => "next/dist/compiled/server-only/index".to_string(),
@@ -641,7 +657,7 @@ async fn insert_next_server_special_aliases(
 
     import_map.insert_exact_alias(
         "@vercel/og",
-        external_if_node(project_path, "next/dist/server/og/image-response"),
+        external_cjs_if_node(project_path, "next/dist/server/og/image-response"),
     );
 
     Ok(())
@@ -667,22 +683,17 @@ async fn rsc_aliases(
 ) -> Result<()> {
     let ppr = *next_config.enable_ppr().await?;
     let taint = *next_config.enable_taint().await?;
-    let dynamic_io = *next_config.enable_dynamic_io().await?;
-    let react_channel = if ppr || taint || dynamic_io {
-        "-experimental"
-    } else {
-        ""
-    };
+    let react_channel = if ppr || taint { "-experimental" } else { "" };
     let react_client_package = get_react_client_package(&next_config).await?;
 
-    let mut alias = IndexMap::new();
+    let mut alias = FxIndexMap::default();
     if matches!(
         ty,
         ServerContextType::AppSSR { .. }
             | ServerContextType::AppRSC { .. }
             | ServerContextType::AppRoute { .. }
     ) {
-        alias.extend(indexmap! {
+        alias.extend(fxindexmap! {
             "react" => format!("next/dist/compiled/react{react_channel}"),
             "react-dom" => format!("next/dist/compiled/react-dom{react_channel}"),
             "react/jsx-runtime" => format!("next/dist/compiled/react{react_channel}/jsx-runtime"),
@@ -697,7 +708,7 @@ async fn rsc_aliases(
             "react-dom/server.browser" => format!("next/dist/compiled/react-dom{react_channel}/server.browser"),
         });
     }
-    alias.extend(indexmap! {
+    alias.extend(fxindexmap! {
         "react-server-dom-webpack/client" => format!("next/dist/compiled/react-server-dom-turbopack{react_channel}/client"),
         "react-server-dom-webpack/client.edge" => format!("next/dist/compiled/react-server-dom-turbopack{react_channel}/client.edge"),
         "react-server-dom-webpack/server.edge" => format!("next/dist/compiled/react-server-dom-turbopack{react_channel}/server.edge"),
@@ -713,7 +724,7 @@ async fn rsc_aliases(
     if runtime == NextRuntime::NodeJs {
         match ty {
             ServerContextType::AppSSR { .. } => {
-                alias.extend(indexmap! {
+                alias.extend(fxindexmap! {
                     "react/jsx-runtime" => format!("next/dist/server/route-modules/app-page/vendored/ssr/react-jsx-runtime"),
                     "react/jsx-dev-runtime" => format!("next/dist/server/route-modules/app-page/vendored/ssr/react-jsx-dev-runtime"),
                     "react/compiler-runtime" => format!("next/dist/server/route-modules/app-page/vendored/ssr/react-compiler-runtime"),
@@ -727,7 +738,7 @@ async fn rsc_aliases(
             | ServerContextType::AppRoute { .. }
             | ServerContextType::Middleware { .. }
             | ServerContextType::Instrumentation { .. } => {
-                alias.extend(indexmap! {
+                alias.extend(fxindexmap! {
                     "react/jsx-runtime" => format!("next/dist/server/route-modules/app-page/vendored/rsc/react-jsx-runtime"),
                     "react/jsx-dev-runtime" => format!("next/dist/server/route-modules/app-page/vendored/rsc/react-jsx-dev-runtime"),
                     "react/compiler-runtime" => format!("next/dist/server/route-modules/app-page/vendored/rsc/react-compiler-runtime"),
@@ -750,7 +761,7 @@ async fn rsc_aliases(
     }
 
     if runtime == NextRuntime::Edge && ty.supports_react_server() {
-        alias.extend(indexmap! {
+        alias.extend(fxindexmap! {
             "react" => format!("next/dist/compiled/react{react_channel}/react.react-server"),
             "next/dist/compiled/react" => format!("next/dist/compiled/react{react_channel}/react.react-server"),
             "next/dist/compiled/react-experimental" =>  format!("next/dist/compiled/react-experimental/react.react-server"),
@@ -787,7 +798,7 @@ async fn insert_optimized_module_aliases(
     insert_exact_alias_map(
         import_map,
         project_path,
-        indexmap! {
+        fxindexmap! {
             "unfetch" => "next/dist/build/polyfills/fetch/index.js".to_string(),
             "isomorphic-unfetch" => "next/dist/build/polyfills/fetch/index.js".to_string(),
             "whatwg-fetch" => "next/dist/build/polyfills/fetch/whatwg-fetch.js".to_string(),
@@ -856,7 +867,7 @@ async fn insert_next_shared_aliases(
     );
 
     import_map.insert_alias(
-        AliasPattern::exact("@vercel/turbopack-next/internal/font/google/font"),
+        AliasPattern::exact(GOOGLE_FONTS_INTERNAL_PREFIX),
         ImportMapping::Dynamic(Vc::upcast(NextFontGoogleFontFileReplacer::new(
             project_path,
         )))
@@ -911,6 +922,13 @@ async fn insert_next_shared_aliases(
     import_map.insert_exact_alias(
         "private-next-rsc-action-encryption",
         request_to_import_mapping(project_path, "next/dist/server/app-render/encryption"),
+    );
+    import_map.insert_exact_alias(
+        "private-next-rsc-cache-wrapper",
+        request_to_import_mapping(
+            project_path,
+            "next/dist/build/webpack/loaders/next-flight-loader/cache-wrapper",
+        ),
     );
 
     insert_turbopack_dev_alias(import_map);
@@ -1002,7 +1020,7 @@ fn export_value_to_import_mapping(
 fn insert_exact_alias_map(
     import_map: &mut ImportMap,
     project_path: Vc<FileSystemPath>,
-    map: IndexMap<&'static str, String>,
+    map: FxIndexMap<&'static str, String>,
 ) {
     for (pattern, request) in map {
         import_map.insert_exact_alias(pattern, request_to_import_mapping(project_path, &request));
@@ -1012,7 +1030,7 @@ fn insert_exact_alias_map(
 fn insert_wildcard_alias_map(
     import_map: &mut ImportMap,
     project_path: Vc<FileSystemPath>,
-    map: IndexMap<&'static str, String>,
+    map: FxIndexMap<&'static str, String>,
 ) {
     for (pattern, request) in map {
         import_map
@@ -1061,6 +1079,12 @@ fn request_to_import_mapping(context_path: Vc<FileSystemPath>, request: &str) ->
 
 /// Creates a direct import mapping to the result of resolving an external
 /// request.
-fn external_request_to_import_mapping(request: &str) -> Vc<ImportMapping> {
+fn external_request_to_cjs_import_mapping(request: &str) -> Vc<ImportMapping> {
     ImportMapping::External(Some(request.into()), ExternalType::CommonJs).into()
+}
+
+/// Creates a direct import mapping to the result of resolving an external
+/// request.
+fn external_request_to_esm_import_mapping(request: &str) -> Vc<ImportMapping> {
+    ImportMapping::External(Some(request.into()), ExternalType::EcmaScriptModule).into()
 }

@@ -9,7 +9,8 @@ import type { MiddlewareRouteMatch } from '../../../shared/lib/router/utils/midd
 import type { PropagateToWorkersField } from './types'
 import type { NextJsHotReloaderInterface } from '../../dev/hot-reloader-types'
 
-import { createDefineEnv, type Project } from '../../../build/swc'
+import { createDefineEnv } from '../../../build/swc'
+import type { Project } from '../../../build/swc/types'
 import fs from 'fs'
 import { mkdir } from 'fs/promises'
 import url from 'url'
@@ -65,7 +66,8 @@ import {
 } from '../../../build/utils'
 import {
   createOriginalStackFrame,
-  getSourceById,
+  getSourceMapFromCompilation,
+  getSourceMapFromFile,
   parseStack,
 } from '../../../client/components/react-dev-overlay/server/middleware'
 import {
@@ -79,12 +81,12 @@ import { PAGE_TYPES } from '../../../lib/page-types'
 import { createHotReloaderTurbopack } from '../../dev/hot-reloader-turbopack'
 import { getErrorSource } from '../../../shared/lib/error-source'
 import type { StackFrame } from 'next/dist/compiled/stacktrace-parser'
-import { generateEncryptionKeyBase64 } from '../../app-render/encryption-utils'
+import { generateEncryptionKeyBase64 } from '../../app-render/encryption-utils-server'
 import {
   ModuleBuildError,
   TurbopackInternalError,
 } from '../../dev/turbopack-utils'
-import { isMetadataRoute } from '../../../lib/metadata/is-metadata-route'
+import { isMetadataRouteFile } from '../../../lib/metadata/is-metadata-route'
 import { normalizeMetadataPageToRoute } from '../../../lib/metadata/get-metadata-route'
 import { createEnvDefinitions } from '../experimental/create-env-definitions'
 import { JsConfigPathsPlugin } from '../../../build/webpack/plugins/jsconfig-paths-plugin'
@@ -122,7 +124,7 @@ export type ServerFields = {
   interceptionRoutes?: ReturnType<
     typeof import('./filesystem').buildCustomRoute
   >[]
-  setAppIsrStatus?: (key: string, value: false | number | null) => void
+  setAppIsrStatus?: (key: string, value: boolean) => void
   resetFetch?: () => void
 }
 
@@ -188,10 +190,13 @@ async function startWatcher(opts: SetupOpts) {
     : new HotReloaderWebpack(opts.dir, {
         appDir,
         pagesDir,
-        distDir: distDir,
+        distDir,
         config: opts.nextConfig,
         buildId: 'development',
-        encryptionKey: await generateEncryptionKeyBase64(),
+        encryptionKey: await generateEncryptionKeyBase64({
+          isBuild: false,
+          distDir,
+        }),
         telemetry: opts.telemetry,
         rewrites: opts.fsChecker.rewrites,
         previewProps: opts.fsChecker.prerenderManifest.preview,
@@ -424,7 +429,15 @@ async function startWatcher(opts: SetupOpts) {
           pagesType: isAppPath ? PAGE_TYPES.APP : PAGE_TYPES.PAGES,
         })
 
-        if (isAppPath && isMetadataRoute(pageName)) {
+        if (
+          isAppPath &&
+          appDir &&
+          isMetadataRouteFile(
+            fileName.replace(appDir, ''),
+            nextConfig.pageExtensions,
+            true
+          )
+        ) {
           const staticInfo = await getPageStaticInfo({
             pageFilePath: fileName,
             nextConfig: {},
@@ -597,7 +610,7 @@ async function startWatcher(opts: SetupOpts) {
           try {
             tsconfigResult = await loadJsConfig(dir, nextConfig)
           } catch (_) {
-            /* do we want to log if there are syntax errors in tsconfig  while editing? */
+            /* do we want to log if there are syntax errors in tsconfig while editing? */
           }
         }
 
@@ -953,7 +966,7 @@ async function startWatcher(opts: SetupOpts) {
                   file: frameFile,
                   methodName: frame.methodName,
                   line: frame.lineNumber ?? 0,
-                  column: frame.column,
+                  column: frame.column ?? undefined,
                   isServer: true,
                 }
               )
@@ -976,26 +989,27 @@ async function startWatcher(opts: SetupOpts) {
                 : hotReloader.serverStats?.compilation
             )!
 
-            const source = await getSourceById(
-              !!frame.file?.startsWith(path.sep) ||
-                !!frame.file?.startsWith('file:'),
-              moduleId,
-              compilation
-            )
+            const sourceMap = await (frame.file?.startsWith(path.sep) ||
+            frame.file?.startsWith('file:')
+              ? getSourceMapFromFile(frame.file)
+              : getSourceMapFromCompilation(moduleId, compilation))
 
-            try {
-              originalFrame = await createOriginalStackFrame({
-                source,
-                frame,
-                moduleId,
-                modulePath,
-                rootDirectory: opts.dir,
-                errorMessage: err.message,
-                compilation: isEdgeCompiler
-                  ? hotReloader.edgeServerStats?.compilation
-                  : hotReloader.serverStats?.compilation,
-              })
-            } catch {}
+            if (sourceMap) {
+              try {
+                originalFrame = await createOriginalStackFrame({
+                  source: {
+                    type: 'bundle',
+                    sourceMap,
+                    compilation,
+                    moduleId,
+                    modulePath,
+                  },
+                  frame,
+                  rootDirectory: opts.dir,
+                  errorMessage: err.message,
+                })
+              } catch {}
+            }
           }
 
           if (
@@ -1124,7 +1138,7 @@ async function traceTurbopackErrorStack(
           file: f.file!,
           methodName: f.methodName,
           line: f.lineNumber ?? 0,
-          column: f.column,
+          column: f.column ?? undefined,
           isServer: true,
         })
 

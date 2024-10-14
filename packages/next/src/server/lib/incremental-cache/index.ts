@@ -10,6 +10,7 @@ import {
 import type { Revalidate } from '../revalidate'
 import type { DeepReadonly } from '../../../shared/lib/deep-readonly'
 
+import { cacheScopeAsyncLocalStorage } from '../../async-storage/cache-scope.external'
 import FetchCache from './fetch-cache'
 import FileSystemCache from './file-system-cache'
 import { normalizePagePath } from '../../../shared/lib/page-path/normalize-page-path'
@@ -22,6 +23,7 @@ import {
 } from '../../../lib/constants'
 import { toRoute } from '../to-route'
 import { SharedRevalidateTimings } from './shared-revalidate-timings'
+import { getBuiltinRequestContext } from '../../after/builtin-request-context'
 
 export interface CacheHandlerContext {
   fs?: CacheFs
@@ -76,9 +78,9 @@ export class IncrementalCache implements IncrementalCacheType {
   readonly fetchCacheKeyPrefix?: string
   readonly revalidatedTags?: string[]
   readonly isOnDemandRevalidate?: boolean
+  readonly hasDynamicIO?: boolean
 
   private readonly locks = new Map<string, Promise<void>>()
-  private readonly unlocks = new Map<string, () => Promise<void>>()
 
   /**
    * The revalidate timings for routes. This will source the timings from the
@@ -89,6 +91,7 @@ export class IncrementalCache implements IncrementalCacheType {
   constructor({
     fs,
     dev,
+    dynamicIO,
     flushToDisk,
     fetchCache,
     minimalMode,
@@ -103,6 +106,7 @@ export class IncrementalCache implements IncrementalCacheType {
   }: {
     fs?: CacheFs
     dev: boolean
+    dynamicIO: boolean
     fetchCache?: boolean
     minimalMode?: boolean
     serverDistDir?: string
@@ -117,6 +121,13 @@ export class IncrementalCache implements IncrementalCacheType {
   }) {
     const debug = !!process.env.NEXT_PRIVATE_DEBUG_CACHE
     this.hasCustomCacheHandler = Boolean(CurCacheHandler)
+
+    const globalCacheHandler = getBuiltinRequestContext()?.NextCacheHandler
+
+    if (globalCacheHandler) {
+      CurCacheHandler = globalCacheHandler
+    }
+
     if (!CurCacheHandler) {
       if (fs && serverDistDir) {
         if (debug) {
@@ -143,6 +154,7 @@ export class IncrementalCache implements IncrementalCacheType {
       maxMemoryCacheSize = parseInt(process.env.__NEXT_TEST_MAX_ISR_CACHE, 10)
     }
     this.dev = dev
+    this.hasDynamicIO = dynamicIO
     this.disableForTestmode = process.env.NEXT_PRIVATE_TEST_PROXY === 'true'
     // this is a hack to avoid Webpack knowing this is equal to this.minimalMode
     // because we replace this.minimalMode to true in production bundles.
@@ -195,7 +207,8 @@ export class IncrementalCache implements IncrementalCacheType {
   ): Revalidate {
     // in development we don't have a prerender-manifest
     // and default to always revalidating to allow easier debugging
-    if (dev) return new Date().getTime() - 1000
+    if (dev)
+      return Math.floor(performance.timeOrigin + performance.now() - 1000)
 
     // if an entry isn't present in routes we fallback to a default
     // of revalidating after 1 second unless it's a fallback request.
@@ -218,28 +231,22 @@ export class IncrementalCache implements IncrementalCacheType {
     this.cacheHandler?.resetRequestCache?.()
   }
 
-  /**
-   * @TODO this implementation of locking is brokne. Once a lock is created it
-   * will always be reused and all future locks will end up being granted
-   * non-exclusively which is sort of the opposite of what we want with a lock.
-   */
   async lock(cacheKey: string) {
     let unlockNext: () => Promise<void> = () => Promise.resolve()
     const existingLock = this.locks.get(cacheKey)
 
     if (existingLock) {
       await existingLock
-    } else {
-      const newLock = new Promise<void>((resolve) => {
-        unlockNext = async () => {
-          resolve()
-        }
-      })
-
-      this.locks.set(cacheKey, newLock)
-      this.unlocks.set(cacheKey, unlockNext)
     }
 
+    const newLock = new Promise<void>((resolve) => {
+      unlockNext = async () => {
+        resolve()
+        this.locks.delete(cacheKey) // Remove the lock upon release
+      }
+    })
+
+    this.locks.set(cacheKey, newLock)
     return unlockNext
   }
 
@@ -395,12 +402,31 @@ export class IncrementalCache implements IncrementalCacheType {
       return null
     }
 
+    const { isFallback } = ctx
+
     cacheKey = this._getPathname(
       cacheKey,
       ctx.kind === IncrementalCacheKind.FETCH
     )
     let entry: IncrementalCacheEntry | null = null
     let revalidate = ctx.revalidate
+
+    if (this.hasDynamicIO && ctx.kind === IncrementalCacheKind.FETCH) {
+      const cacheScope = cacheScopeAsyncLocalStorage.getStore()
+
+      if (cacheScope) {
+        const memoryCacheData = cacheScope.cache.get(cacheKey)
+
+        if (memoryCacheData?.kind === CachedRouteKind.FETCH) {
+          return {
+            isStale: false,
+            value: memoryCacheData,
+            revalidateAfter: false,
+            isFallback: false,
+          }
+        }
+      }
+    }
 
     const cacheData = await this.cacheHandler?.get(cacheKey, ctx)
 
@@ -416,7 +442,11 @@ export class IncrementalCache implements IncrementalCacheType {
       }
 
       revalidate = revalidate || cacheData.value.revalidate
-      const age = (Date.now() - (cacheData.lastModified || 0)) / 1000
+      const age =
+        (performance.timeOrigin +
+          performance.now() -
+          (cacheData.lastModified || 0)) /
+        1000
 
       const isStale = age > revalidate
       const data = cacheData.value.data
@@ -428,8 +458,10 @@ export class IncrementalCache implements IncrementalCacheType {
           data,
           revalidate: revalidate,
         },
-        revalidateAfter: Date.now() + revalidate * 1000,
-      }
+        revalidateAfter:
+          performance.timeOrigin + performance.now() + revalidate * 1000,
+        isFallback,
+      } satisfies IncrementalCacheEntry
     }
 
     const curRevalidate = this.revalidateTimings.get(toRoute(cacheKey))
@@ -443,12 +475,13 @@ export class IncrementalCache implements IncrementalCacheType {
     } else {
       revalidateAfter = this.calculateRevalidate(
         cacheKey,
-        cacheData?.lastModified || Date.now(),
+        cacheData?.lastModified || performance.timeOrigin + performance.now(),
         this.dev ? ctx.kind !== IncrementalCacheKind.FETCH : false,
         ctx.isFallback
       )
       isStale =
-        revalidateAfter !== false && revalidateAfter < Date.now()
+        revalidateAfter !== false &&
+        revalidateAfter < performance.timeOrigin + performance.now()
           ? true
           : undefined
     }
@@ -459,6 +492,7 @@ export class IncrementalCache implements IncrementalCacheType {
         curRevalidate,
         revalidateAfter,
         value: cacheData.value,
+        isFallback,
       }
     }
 
@@ -476,6 +510,7 @@ export class IncrementalCache implements IncrementalCacheType {
         value: null,
         curRevalidate,
         revalidateAfter,
+        isFallback,
       }
       this.set(cacheKey, entry.value, ctx)
     }
@@ -497,6 +532,17 @@ export class IncrementalCache implements IncrementalCacheType {
     }
   ) {
     if (this.disableForTestmode || (this.dev && !ctx.fetchCache)) return
+
+    pathname = this._getPathname(pathname, ctx.fetchCache)
+
+    if (this.hasDynamicIO && data?.kind === CachedRouteKind.FETCH) {
+      const cacheScope = cacheScopeAsyncLocalStorage.getStore()
+
+      if (cacheScope) {
+        cacheScope.cache.set(pathname, data)
+      }
+    }
+
     // FetchCache has upper limit of 2MB per-entry currently
     const itemSize = JSON.stringify(data).length
     if (
@@ -513,8 +559,6 @@ export class IncrementalCache implements IncrementalCacheType {
       }
       return
     }
-
-    pathname = this._getPathname(pathname, ctx.fetchCache)
 
     try {
       // Set the value for the revalidate seconds so if it changes we can

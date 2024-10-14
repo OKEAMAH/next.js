@@ -2,10 +2,9 @@ use std::{collections::HashMap, path::Path};
 
 use anyhow::{bail, Context, Result};
 use futures::FutureExt;
-use indexmap::IndexMap;
 use indoc::formatdoc;
 use serde::{Deserialize, Serialize};
-use turbo_tasks::{Completion, RcStr, Value, Vc};
+use turbo_tasks::{Completion, FxIndexMap, RcStr, Value, Vc};
 use turbo_tasks_bytes::stream::SingleValue;
 use turbo_tasks_env::{CommandLineProcessEnv, ProcessEnv};
 use turbo_tasks_fetch::{fetch, HttpResponseBody};
@@ -63,8 +62,12 @@ pub const USER_AGENT_FOR_GOOGLE_FONTS: &str = "Mozilla/5.0 (Macintosh; Intel Mac
                                                AppleWebKit/537.36 (KHTML, like Gecko) \
                                                Chrome/104.0.0.0 Safari/537.36";
 
+/// The google fonts plugin downloads fonts locally and transforms the url in the css into a
+/// specific format that is then intercepted later. This is the prefix we use for the new url.
+pub const GOOGLE_FONTS_INTERNAL_PREFIX: &str = "@vercel/turbopack-next/internal/font/google/font";
+
 #[turbo_tasks::value(transparent)]
-struct FontData(IndexMap<RcStr, FontDataEntry>);
+struct FontData(FxIndexMap<RcStr, FontDataEntry>);
 
 #[turbo_tasks::value(shared)]
 pub(crate) struct NextFontGoogleReplacer {
@@ -362,7 +365,8 @@ impl ImportMappingReplacement for NextFontGoogleFontFileReplacer {
         }
 
         let font_virtual_path = next_js_file_path("internal/font/google".into())
-            .join(format!("/{}.{}", name, ext).into());
+            .join(format!("/{}.{}", name, ext).into())
+            .truncate_file_name_with_hash_vc();
 
         // doesn't seem ideal to download the font into a string, but probably doesn't
         // really matter either.
@@ -430,10 +434,7 @@ async fn update_google_stylesheet(
 
         stylesheet = stylesheet.replace(
             &font_url,
-            &format!(
-                "@vercel/turbopack-next/internal/font/google/font?{}",
-                query_str
-            ),
+            &format!("{}?{}", GOOGLE_FONTS_INTERNAL_PREFIX, query_str),
         )
     }
 

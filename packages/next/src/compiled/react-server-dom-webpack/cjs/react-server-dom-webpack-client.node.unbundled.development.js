@@ -22,6 +22,38 @@
         : (obj[key] = value);
       return obj;
     }
+    function bindToConsole(methodName, args, badgeName) {
+      var offset = 0;
+      switch (methodName) {
+        case "dir":
+        case "dirxml":
+        case "groupEnd":
+        case "table":
+          return bind$1.apply(console[methodName], [console].concat(args));
+        case "assert":
+          offset = 1;
+      }
+      args = args.slice(0);
+      "string" === typeof args[offset]
+        ? args.splice(
+            offset,
+            1,
+            "\u001b[0m\u001b[7m%c%s\u001b[0m%c " + args[offset],
+            "background: #e6e6e6;background: light-dark(rgba(0,0,0,0.1), rgba(255,255,255,0.25));color: #000000;color: light-dark(#000000, #ffffff);border-radius: 2px",
+            " " + badgeName + " ",
+            ""
+          )
+        : args.splice(
+            offset,
+            0,
+            "\u001b[0m\u001b[7m%c%s\u001b[0m%c ",
+            "background: #e6e6e6;background: light-dark(rgba(0,0,0,0.1), rgba(255,255,255,0.25));color: #000000;color: light-dark(#000000, #ffffff);border-radius: 2px",
+            " " + badgeName + " ",
+            ""
+          );
+      args.unshift(console);
+      return bind$1.apply(console[methodName], args);
+    }
     function resolveClientReference(bundlerConfig, metadata) {
       var moduleExports = bundlerConfig[metadata[0]];
       if ((bundlerConfig = moduleExports[metadata[2]]))
@@ -697,12 +729,17 @@
         pendingParts = 0,
         formData = null,
         writtenObjects = new WeakMap(),
-        modelRoot = root;
-      root = serializeModel(root, 0);
+        modelRoot = root,
+        json = serializeModel(root, 0);
       null === formData
-        ? resolve(root)
-        : (formData.set(formFieldPrefix + "0", root),
+        ? resolve(json)
+        : (formData.set(formFieldPrefix + "0", json),
           0 === pendingParts && resolve(formData));
+      return function () {
+        0 < pendingParts &&
+          ((pendingParts = 0),
+          null === formData ? resolve(json) : resolve(formData));
+      };
     }
     function encodeFormData(reference) {
       var resolve,
@@ -1260,17 +1297,22 @@
             }
           value = value[path[i]];
         }
-        parentObject[key] = map(response, value);
-        "" === key &&
-          null === handler.value &&
-          (handler.value = parentObject[key]);
-        parentObject[0] === REACT_ELEMENT_TYPE &&
-          "3" === key &&
+        i = map(response, value);
+        parentObject[key] = i;
+        "" === key && null === handler.value && (handler.value = i);
+        if (
+          parentObject[0] === REACT_ELEMENT_TYPE &&
           "object" === typeof handler.value &&
           null !== handler.value &&
-          handler.value.$$typeof === REACT_ELEMENT_TYPE &&
-          null === handler.value.props &&
-          (handler.value.props = parentObject[key]);
+          handler.value.$$typeof === REACT_ELEMENT_TYPE
+        )
+          switch (((value = handler.value), key)) {
+            case "3":
+              value.props = i;
+              break;
+            case "4":
+              value._owner = i;
+          }
         handler.deps--;
         0 === handler.deps &&
           ((i = handler.chunk),
@@ -1335,11 +1377,8 @@
       }
       switch (id.status) {
         case "fulfilled":
-          for (var value = id.value, i = 1; i < reference.length; i++)
-            if (
-              ((value = value[reference[i]]),
-              value.$$typeof === REACT_LAZY_TYPE)
-            )
+          for (var value = id.value, i = 1; i < reference.length; i++) {
+            for (; value.$$typeof === REACT_LAZY_TYPE; )
               if (((value = value._payload), "fulfilled" === value.status))
                 value = value.value;
               else
@@ -1349,8 +1388,10 @@
                   key,
                   response,
                   map,
-                  reference.slice(i)
+                  reference.slice(i - 1)
                 );
+            value = value[reference[i]];
+          }
           response = map(response, value);
           id._debugInfo &&
             ("object" !== typeof response ||
@@ -1488,6 +1529,17 @@
                 createFormData
               )
             );
+          case "Z":
+            return (
+              (value = value.slice(2)),
+              getOutlinedModel(
+                response,
+                value,
+                parentObject,
+                key,
+                resolveErrorDev
+              )
+            );
           case "i":
             return (
               (value = value.slice(2)),
@@ -1521,7 +1573,7 @@
             return (
               Object.defineProperty(parentObject, key, {
                 get: function () {
-                  throw "This object has been omitted by React in the console log to avoid sending too much data from the server. Try logging smaller or more specific objects.";
+                  return "This object has been omitted by React in the console log to avoid sending too much data from the server. Try logging smaller or more specific objects.";
                 },
                 enumerable: !0,
                 configurable: !1
@@ -1565,11 +1617,35 @@
       this._rowLength = this._rowTag = this._rowID = this._rowState = 0;
       this._buffer = [];
       this._tempRefs = temporaryReferences;
+      this._debugRootOwner = bundlerConfig =
+        void 0 === ReactSharedInteralsServer ||
+        null === ReactSharedInteralsServer.A
+          ? null
+          : ReactSharedInteralsServer.A.getOwner();
+      this._debugRootStack =
+        null !== bundlerConfig ? Error("react-stack-top-frame") : null;
       this._debugFindSourceMapURL = findSourceMapURL;
       this._replayConsole = replayConsole;
       this._rootEnvironmentName =
         void 0 === environmentName ? "Server" : environmentName;
       this._fromJSON = createFromJSONCallback(this);
+    }
+    function resolveModel(response, id, model) {
+      var chunks = response._chunks,
+        chunk = chunks.get(id);
+      chunk
+        ? resolveModelChunk(chunk, model)
+        : chunks.set(
+            id,
+            new ReactPromise("resolved_model", model, null, response)
+          );
+    }
+    function resolveText(response, id, text) {
+      var chunks = response._chunks,
+        chunk = chunks.get(id);
+      chunk && "pending" !== chunk.status
+        ? chunk.reason.enqueueValue(text)
+        : chunks.set(id, new ReactPromise("fulfilled", text, null, response));
     }
     function resolveBuffer(response, id, buffer) {
       var chunks = response._chunks,
@@ -1810,6 +1886,88 @@
         }
       );
     }
+    function stopStream(response, id, row) {
+      (response = response._chunks.get(id)) &&
+        "fulfilled" === response.status &&
+        response.reason.close("" === row ? '"$undefined"' : row);
+    }
+    function resolveErrorDev(response, errorInfo) {
+      response = errorInfo.stack;
+      var env = errorInfo.env;
+      errorInfo = Error(
+        errorInfo.message ||
+          "An error occurred in the Server Components render but no message was provided"
+      );
+      var v8StyleStack = errorInfo.name + ": " + errorInfo.message;
+      if (response)
+        for (var i = 0; i < response.length; i++) {
+          var frame = response[i],
+            name = frame[0],
+            filename = frame[1],
+            line = frame[2];
+          frame = frame[3];
+          v8StyleStack = name
+            ? v8StyleStack +
+              ("\n    at " +
+                name +
+                " (" +
+                filename +
+                ":" +
+                line +
+                ":" +
+                frame +
+                ")")
+            : v8StyleStack +
+              ("\n    at " + filename + ":" + line + ":" + frame);
+        }
+      errorInfo.stack = v8StyleStack;
+      errorInfo.environmentName = env;
+      return errorInfo;
+    }
+    function resolveHint(response, code, model) {
+      response = JSON.parse(model, response._fromJSON);
+      model = ReactDOMSharedInternals.d;
+      switch (code) {
+        case "D":
+          model.D(response);
+          break;
+        case "C":
+          "string" === typeof response
+            ? model.C(response)
+            : model.C(response[0], response[1]);
+          break;
+        case "L":
+          code = response[0];
+          var as = response[1];
+          3 === response.length
+            ? model.L(code, as, response[2])
+            : model.L(code, as);
+          break;
+        case "m":
+          "string" === typeof response
+            ? model.m(response)
+            : model.m(response[0], response[1]);
+          break;
+        case "X":
+          "string" === typeof response
+            ? model.X(response)
+            : model.X(response[0], response[1]);
+          break;
+        case "S":
+          "string" === typeof response
+            ? model.S(response)
+            : model.S(
+                response[0],
+                0 === response[1] ? void 0 : response[1],
+                3 === response.length ? response[2] : void 0
+              );
+          break;
+        case "M":
+          "string" === typeof response
+            ? model.M(response)
+            : model.M(response[0], response[1]);
+      }
+    }
     function createFakeFunction(
       name,
       filename,
@@ -1856,6 +2014,34 @@
       }
       return fn;
     }
+    function buildFakeCallStack(response, stack, environmentName, innerCall) {
+      for (var i = 0; i < stack.length; i++) {
+        var frame = stack[i],
+          frameKey = frame.join("-") + "-" + environmentName,
+          fn = fakeFunctionCache.get(frameKey);
+        if (void 0 === fn) {
+          fn = frame[0];
+          var filename = frame[1],
+            line = frame[2];
+          frame = frame[3];
+          var findSourceMapURL = response._debugFindSourceMapURL;
+          findSourceMapURL = findSourceMapURL
+            ? findSourceMapURL(filename, environmentName)
+            : null;
+          fn = createFakeFunction(
+            fn,
+            filename,
+            findSourceMapURL,
+            line,
+            frame,
+            environmentName
+          );
+          fakeFunctionCache.set(frameKey, fn);
+        }
+        innerCall = fn.bind(null, innerCall);
+      }
+      return innerCall;
+    }
     function fakeJSXCallSite() {
       return Error("react-stack-top-frame");
     }
@@ -1870,8 +2056,25 @@
         null != debugInfo.owner &&
           initializeFakeStack(response, debugInfo.owner));
     }
+    function resolveDebugInfo(response, id, debugInfo) {
+      null === debugInfo.owner && null != response._debugRootOwner
+        ? ((debugInfo.owner = response._debugRootOwner),
+          (debugInfo.debugStack = response._debugRootStack))
+        : initializeFakeStack(response, debugInfo);
+      response = getChunk(response, id);
+      (response._debugInfo || (response._debugInfo = [])).push(debugInfo);
+    }
     function getCurrentStackInDEV() {
       return "";
+    }
+    function resolveConsoleEntry(response, value) {
+      if (response._replayConsole) {
+        var payload = JSON.parse(value, response._fromJSON);
+        response = payload[0];
+        value = payload[3];
+        payload = payload.slice(4);
+        bindToConsole(response, payload, value)();
+      }
     }
     function mergeBuffer(buffer, lastChunk) {
       for (
@@ -1969,149 +2172,35 @@
           resolveModule(response, id, row);
           break;
         case 72:
-          id = row[0];
-          row = row.slice(1);
-          response = JSON.parse(row, response._fromJSON);
-          row = ReactDOMSharedInternals.d;
-          switch (id) {
-            case "D":
-              row.D(response);
-              break;
-            case "C":
-              "string" === typeof response
-                ? row.C(response)
-                : row.C(response[0], response[1]);
-              break;
-            case "L":
-              id = response[0];
-              var as = response[1];
-              3 === response.length
-                ? row.L(id, as, response[2])
-                : row.L(id, as);
-              break;
-            case "m":
-              "string" === typeof response
-                ? row.m(response)
-                : row.m(response[0], response[1]);
-              break;
-            case "X":
-              "string" === typeof response
-                ? row.X(response)
-                : row.X(response[0], response[1]);
-              break;
-            case "S":
-              "string" === typeof response
-                ? row.S(response)
-                : row.S(
-                    response[0],
-                    0 === response[1] ? void 0 : response[1],
-                    3 === response.length ? response[2] : void 0
-                  );
-              break;
-            case "M":
-              "string" === typeof response
-                ? row.M(response)
-                : row.M(response[0], response[1]);
-          }
+          resolveHint(response, row[0], row.slice(1));
           break;
         case 69:
-          tag = JSON.parse(row);
-          as = tag.digest;
-          var env = tag.env;
-          row = Error(
-            tag.message ||
-              "An error occurred in the Server Components render but no message was provided"
-          );
-          tag = tag.stack;
-          var v8StyleStack = row.name + ": " + row.message;
-          if (tag)
-            for (var i = 0; i < tag.length; i++) {
-              var frame = tag[i],
-                name = frame[0],
-                filename = frame[1],
-                line = frame[2];
-              frame = frame[3];
-              v8StyleStack = name
-                ? v8StyleStack +
-                  ("\n    at " +
-                    name +
-                    " (" +
-                    filename +
-                    ":" +
-                    line +
-                    ":" +
-                    frame +
-                    ")")
-                : v8StyleStack +
-                  ("\n    at " + filename + ":" + line + ":" + frame);
-            }
-          row.stack = v8StyleStack;
-          row.digest = as;
-          row.environmentName = env;
-          as = response._chunks;
-          (env = as.get(id))
-            ? triggerErrorOnChunk(env, row)
-            : as.set(id, new ReactPromise("rejected", null, row, response));
+          row = JSON.parse(row);
+          tag = resolveErrorDev(response, row);
+          tag.digest = row.digest;
+          row = response._chunks;
+          var chunk = row.get(id);
+          chunk
+            ? triggerErrorOnChunk(chunk, tag)
+            : row.set(id, new ReactPromise("rejected", null, tag, response));
           break;
         case 84:
-          as = response._chunks;
-          (env = as.get(id)) && "pending" !== env.status
-            ? env.reason.enqueueValue(row)
-            : as.set(id, new ReactPromise("fulfilled", row, null, response));
+          resolveText(response, id, row);
           break;
         case 68:
-          row = JSON.parse(row, response._fromJSON);
-          initializeFakeStack(response, row);
-          response = getChunk(response, id);
-          (response._debugInfo || (response._debugInfo = [])).push(row);
+          tag = new ReactPromise("resolved_model", row, null, response);
+          initializeModelChunk(tag);
+          "fulfilled" === tag.status
+            ? resolveDebugInfo(response, id, tag.value)
+            : tag.then(
+                function (v) {
+                  return resolveDebugInfo(response, id, v);
+                },
+                function () {}
+              );
           break;
         case 87:
-          if (response._replayConsole) {
-            row = JSON.parse(row, response._fromJSON);
-            response = row[0];
-            id = row[3];
-            row = row.slice(4);
-            tag = ReactSharedInternals.getCurrentStack;
-            ReactSharedInternals.getCurrentStack = getCurrentStackInDEV;
-            try {
-              b: {
-                v8StyleStack = 0;
-                switch (response) {
-                  case "dir":
-                  case "dirxml":
-                  case "groupEnd":
-                  case "table":
-                    as = bind$1.apply(console[response], [console].concat(row));
-                    break b;
-                  case "assert":
-                    v8StyleStack = 1;
-                }
-                env = row.slice(0);
-                "string" === typeof env[v8StyleStack]
-                  ? env.splice(
-                      v8StyleStack,
-                      1,
-                      "\u001b[0m\u001b[7m%c%s\u001b[0m%c " + env[v8StyleStack],
-                      "background: #e6e6e6;background: light-dark(rgba(0,0,0,0.1), rgba(255,255,255,0.25));color: #000000;color: light-dark(#000000, #ffffff);border-radius: 2px",
-                      " " + id + " ",
-                      ""
-                    )
-                  : env.splice(
-                      v8StyleStack,
-                      0,
-                      "\u001b[0m\u001b[7m%c%s\u001b[0m%c ",
-                      "background: #e6e6e6;background: light-dark(rgba(0,0,0,0.1), rgba(255,255,255,0.25));color: #000000;color: light-dark(#000000, #ffffff);border-radius: 2px",
-                      " " + id + " ",
-                      ""
-                    );
-                env.unshift(console);
-                as = bind$1.apply(console[response], env);
-              }
-              as();
-            } finally {
-              ReactSharedInternals.getCurrentStack = tag;
-            }
-          }
+          resolveConsoleEntry(response, row);
           break;
         case 82:
           startReadableStream(response, id, void 0);
@@ -2126,18 +2215,10 @@
           startAsyncIterable(response, id, !0);
           break;
         case 67:
-          (response = response._chunks.get(id)) &&
-            "fulfilled" === response.status &&
-            response.reason.close("" === row ? '"$undefined"' : row);
+          stopStream(response, id, row);
           break;
         default:
-          (as = response._chunks),
-            (env = as.get(id))
-              ? resolveModelChunk(env, row)
-              : as.set(
-                  id,
-                  new ReactPromise("resolved_model", row, null, response)
-                );
+          resolveModel(response, id, row);
       }
     }
     function createFromJSONCallback(response) {
@@ -2147,25 +2228,26 @@
         if ("object" === typeof value && null !== value) {
           if (value[0] === REACT_ELEMENT_TYPE)
             if (
-              ((key = {
+              ((key = value[4]),
+              (value = {
                 $$typeof: REACT_ELEMENT_TYPE,
                 type: value[1],
                 key: value[2],
                 props: value[3],
-                _owner: value[4]
+                _owner: null === key ? response._debugRootOwner : key
               }),
-              Object.defineProperty(key, "ref", {
+              Object.defineProperty(value, "ref", {
                 enumerable: !1,
                 get: nullRefGetter
               }),
-              (key._store = {}),
-              Object.defineProperty(key._store, "validated", {
+              (value._store = {}),
+              Object.defineProperty(value._store, "validated", {
                 configurable: !1,
                 enumerable: !1,
                 writable: !0,
                 value: 1
               }),
-              Object.defineProperty(key, "_debugInfo", {
+              Object.defineProperty(value, "_debugInfo", {
                 configurable: !1,
                 enumerable: !1,
                 writable: !0,
@@ -2176,28 +2258,27 @@
               var handler = initializingHandler;
               initializingHandler = handler.parent;
               handler.errored
-                ? ((value = new ReactPromise(
+                ? ((key = new ReactPromise(
                     "rejected",
                     null,
                     handler.value,
                     response
                   )),
-                  (key = {
-                    name: getComponentNameFromType(key.type) || "",
-                    owner: key._owner
+                  (value = {
+                    name: getComponentNameFromType(value.type) || "",
+                    owner: value._owner
                   }),
-                  (value._debugInfo = [key]),
-                  (key = createLazyChunkWrapper(value)))
+                  (key._debugInfo = [value]),
+                  (value = createLazyChunkWrapper(key)))
                 : 0 < handler.deps &&
-                  ((value = new ReactPromise("blocked", null, null, response)),
-                  (handler.value = key),
-                  (handler.chunk = value),
-                  (key = Object.freeze.bind(Object, key.props)),
-                  value.then(key, key),
-                  (key = createLazyChunkWrapper(value)));
-            } else Object.freeze(key.props);
-          else key = value;
-          return key;
+                  ((key = new ReactPromise("blocked", null, null, response)),
+                  (handler.value = value),
+                  (handler.chunk = key),
+                  (value = Object.freeze.bind(Object, value.props)),
+                  key.then(value, value),
+                  (value = createLazyChunkWrapper(key)));
+            } else Object.freeze(value.props);
+          return value;
         }
         return value;
       };
@@ -2246,9 +2327,11 @@
       jscSpiderMonkeyFrameRegExp = /(?:(.*)@)?(.*):(\d+):(\d+)/,
       REACT_CLIENT_REFERENCE = Symbol.for("react.client.reference");
     new ("function" === typeof WeakMap ? WeakMap : Map)();
-    var ReactSharedInternals =
-      React.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE ||
-      React.__SERVER_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;
+    var ReactSharedInteralsServer =
+        React.__SERVER_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE,
+      ReactSharedInternals =
+        React.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE ||
+        ReactSharedInteralsServer;
     ReactPromise.prototype = Object.create(Promise.prototype);
     ReactPromise.prototype.then = function (resolve, reject) {
       switch (this.status) {
@@ -2284,37 +2367,57 @@
           stack,
           environmentName
         ) {
-          for (var callStack = fakeJSXCallSite, i = 0; i < stack.length; i++) {
-            var frame = stack[i],
-              frameKey = frame.join("-") + "-" + environmentName,
-              fn = fakeFunctionCache.get(frameKey);
-            if (void 0 === fn) {
-              fn = frame[0];
-              var filename = frame[1],
-                line = frame[2];
-              frame = frame[3];
-              var findSourceMapURL = response._debugFindSourceMapURL;
-              findSourceMapURL = findSourceMapURL
-                ? findSourceMapURL(filename, environmentName)
-                : null;
-              fn = createFakeFunction(
-                fn,
-                filename,
-                findSourceMapURL,
-                line,
-                frame,
-                environmentName
-              );
-              fakeFunctionCache.set(frameKey, fn);
-            }
-            callStack = fn.bind(null, callStack);
-          }
-          return callStack();
+          return buildFakeCallStack(
+            response,
+            stack,
+            environmentName,
+            fakeJSXCallSite
+          )();
         }
       },
       createFakeJSXCallStackInDEV = createFakeJSXCallStack[
         "react-stack-bottom-frame"
-      ].bind(createFakeJSXCallStack);
+      ].bind(createFakeJSXCallStack),
+      replayConsoleWithCallStack = {
+        "react-stack-bottom-frame": function (
+          response,
+          methodName,
+          stackTrace,
+          owner,
+          env,
+          args
+        ) {
+          var prevStack = ReactSharedInternals.getCurrentStack;
+          ReactSharedInternals.getCurrentStack = getCurrentStackInDEV;
+          try {
+            var callStack = buildFakeCallStack(
+              response,
+              stackTrace,
+              env,
+              bindToConsole(methodName, args, env)
+            );
+            null != owner && initializeFakeStack(response, owner);
+            var rootTask = response._debugRootTask;
+            if (rootTask)
+              if (response._rootEnvironmentName !== env) {
+                var createTaskFn = console.createTask.bind(
+                  console,
+                  '"use ' + env.toLowerCase() + '"'
+                );
+                var rootTask$jscomp$0 = rootTask.run(createTaskFn);
+              } else rootTask$jscomp$0 = rootTask;
+            else rootTask$jscomp$0 = null;
+            null != rootTask$jscomp$0
+              ? rootTask$jscomp$0.run(callStack)
+              : callStack();
+          } finally {
+            ReactSharedInternals.getCurrentStack = prevStack;
+          }
+        }
+      };
+    replayConsoleWithCallStack["react-stack-bottom-frame"].bind(
+      replayConsoleWithCallStack
+    );
     exports.createFromNodeStream = function (stream, ssrManifest, options) {
       var response = new ResponseInstance(
         ssrManifest.moduleMap,

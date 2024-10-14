@@ -9,7 +9,8 @@ use swc_core::{
 use turbopack_core::{chunk::ModuleId, resolve::pattern::Pattern};
 
 use crate::analyzer::{
-    ConstantNumber, ConstantValue, JsValue, ModuleValue, WellKnownFunctionKind, WellKnownObjectKind,
+    ConstantNumber, ConstantValue, JsValue, JsValueUrlKind, ModuleValue, WellKnownFunctionKind,
+    WellKnownObjectKind,
 };
 
 pub fn unparen(expr: &Expr) -> &Expr {
@@ -34,6 +35,7 @@ pub fn js_value_to_pattern(value: &JsValue) -> Pattern {
             ConstantValue::Regex(exp, flags) => format!("/{exp}/{flags}").into(),
             ConstantValue::Undefined => "undefined".into(),
         }),
+        JsValue::Url(v, JsValueUrlKind::Relative) => Pattern::Constant(v.as_str().into()),
         JsValue::Alternatives {
             total_nodes: _,
             values,
@@ -80,7 +82,7 @@ pub struct StringifyJs<'a, T>(pub &'a T)
 where
     T: ?Sized;
 
-impl<'a, T> std::fmt::Display for StringifyJs<'a, T>
+impl<T> std::fmt::Display for StringifyJs<'_, T>
 where
     T: Serialize + ?Sized,
 {
@@ -91,7 +93,7 @@ where
             f: &'a mut std::fmt::Formatter<'b>,
         }
 
-        impl<'a, 'b> std::io::Write for DisplayWriter<'a, 'b> {
+        impl std::io::Write for DisplayWriter<'_, '_> {
             fn write(&mut self, bytes: &[u8]) -> std::result::Result<usize, std::io::Error> {
                 self.f
                     .write_str(
